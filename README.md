@@ -33,6 +33,7 @@ Qt (Kvantum), the terminal, Spotify, Discord and Chrome.
 | **Laptop (MSI)** | `msi-ec` + `bapirlo-perfd`: Turbo on AC, Eco + silent fans on battery, 80 % charge limit |
 | **iPhone & Windows** | LocalSend (AirDrop-style), an AirPlay receiver, KDE Connect, an iCloud web app, AirPods battery (LibrePods), the Windows drive in Files (read-only by default, with a safety check), a shared folder, Bluetooth key sync, and one-shot *Restart to Windows* (EFI BootNext) |
 | **Productivity** | Kuro Writer (Claude rewrite + offline LanguageTool), Super+A Claude Code terminal, an encrypted Vault, a daily Downloads tidy, clipboard history, emoji picker, Satty screenshots |
+| **Air gestures** | Optional webcam hand control: swipe for workspaces, pinch to click or drag windows, palm for the desktop, fist for play/pause, thumbs for volume, ✌ to scroll or skip songs, 🤙 for the app grid. Off until you turn it on — [setup](#air-gestures-optional) |
 | **Staying healthy** | A Timeshift snapshot before every update (keeps 3). **Kuro Doctor** runs after every update and login, and tells you when an extension no longer supports the new GNOME. Spotify's theme is re-applied after Spotify updates. A monthly cleanup runs too |
 | **Docs** | A full plain-English manual in a themed **Kuro OS Guide** app ([MANUAL.md](MANUAL.md)) and a one-page [emergency sheet](EMERGENCY.md) ([PDF](EMERGENCY.pdf)) |
 
@@ -72,6 +73,33 @@ Log out and back in at the end, then open **Kuro OS Guide** and run **Kuro Docto
 
 **Undo:** every script has `bash <script>.sh restore`, or restore the "Before Kuro OS" snapshot in Timeshift.
 
+## Air gestures (optional)
+
+Control the desktop by holding a hand up to the webcam. A Python daemon runs Google's MediaPipe gesture
+recognizer and sends what it sees over D-Bus to a GNOME Shell extension, which shows a red dot that follows
+your hand and a small view of what the camera sees. Everything runs on your machine; nothing is uploaded.
+
+```bash
+bash ~/bapirlo-os/gestures/setup.sh      # no sudo; ~650 MB (private Python 3.12 + MediaPipe) — leaves gestures OFF
+# log out and back in once, then:
+bapirlo-gestures on                       # or click the ✋ button at the top left
+```
+
+| Gesture | Does |
+|---|---|
+| Swipe ← / → | Previous / next workspace |
+| Swipe ↑ / ↓ | Overview / minimise the window |
+| 🤏 Pinch tap · pinch + move | Click · carry the window under the dot |
+| ✋ Palm, hold still | Show the desktop (again = windows back) |
+| ✊ Fist, hold still | Play / pause |
+| 👍 / 👎 keep holding | Volume up / down |
+| ✌ + move up / down · flick ← / → | Scroll · previous / next song |
+| 🤙 Shaka (thumb + pinky) | App grid — then point and pinch an icon |
+
+Change any of them in `~/.config/bapirlo/gestures.json` (`"actions"`: a built-in name, `"cmd:<command>"` or `"none"`).
+`bapirlo-gestures help` prints the list, `bapirlo-gestures off` stops it and releases the camera (it also lets go
+whenever the screen locks). Remove it with `bash gestures/setup.sh uninstall`.
+
 ## Layout
 
 | Path | What |
@@ -82,6 +110,7 @@ Log out and back in at the end, then open **Kuro OS Guide** and run **Kuro Docto
 | `writer/` | Kuro Writer (GTK4) |
 | `bin/` | The `bapirlo-*` commands (`bapirlo-doctor`, `bapirlo-mode`, `bapirlo-vault`, `bapirlo-restart-windows` …) |
 | `windows/` | Dual-boot helpers (`bapirlo-windows`, `bapirlo-bt-sync`) |
+| `gestures/` · `round17/bapirlo-gestures@bapirlo-os/` | Air gestures: the camera daemon, its setup script, and the shell extension |
 | `greeter/` | The web-greeter login / lock screen theme |
 | `config/settings.dconf` | Exported GNOME + extension settings, with personal data removed (`tools/export-settings.py`) |
 | `round2/` `round3/` `round7/` `final/` | Units, polkit rules, icons and configs those rounds install |
