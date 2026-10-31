@@ -1,0 +1,15 @@
+[Unit]
+Description=Kuro Air Gestures — webcam hand gestures (bapirlo-gestures on|off)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Environment=GLOG_minloglevel=2 TF_CPP_MIN_LOG_LEVEL=3 OMP_NUM_THREADS=2
+ExecStart=%h/.local/share/bapirlo/gesture-venv/bin/python -I %h/bapirlo-os/gestures/kuro-gestures-daemon.py
+Restart=on-failure
+RestartSec=5
+Nice=5
+CPUQuota=80%
+
+[Install]
+WantedBy=graphical-session.target

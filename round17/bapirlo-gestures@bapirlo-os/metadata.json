@@ -1,0 +1,8 @@
+{
+  "uuid": "bapirlo-gestures@bapirlo-os",
+  "name": "Kuro Air Gestures",
+  "description": "Kuro OS: control the desktop with your hand in front of the webcam — swipe for workspaces, pinch to grab and move windows, open palm for the desktop, fist to pause music. The camera side is bapirlo-gestures (off until you turn it on).",
+  "shell-version": ["50", "51"],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}
