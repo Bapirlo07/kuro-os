@@ -4,7 +4,7 @@
 #   bapirlo-flow PART on|off|toggle|status    PART = expander meeting deep-search autopilot
 #   bapirlo-flow hints|palette|arrange|watch|task    do it now (same as the keys)
 #   bapirlo-flow meeting-now on|off           start / end meeting mode by hand
-# Keys: Super+; hints · Super+Shift+P palette · Super+A arrange · Super+Shift+W watch · Super+Shift+D text → task
+# Keys: Super+; hints · Super+Shift+P palette · Super+Shift+A arrange · Super+Shift+W watch · Super+Shift+D text → task
 set -euo pipefail
 UUID=bapirlo-flow@bapirlo-os
 SCHEMA=org.gnome.shell.extensions.bapirlo-flow

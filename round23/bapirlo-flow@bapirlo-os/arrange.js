@@ -1,7 +1,7 @@
-// Kuro One-key arrange — Super+A tiles every window on this workspace (on the focused window's monitor) into a
+// Kuro One-key arrange — Super+Shift+A tiles every window on this workspace (on the focused window's monitor) into a
 // sensible layout for how many there are. The window you used most recently gets the biggest spot:
 //   1 → centred, 2 → 60 / 40, 3 → big left + two stacked, 4 → 2 × 2, 5–6 → big left + grid, more → grid.
-// Press Super+A again within 5 seconds to put everything back where it was.
+// Press Super+Shift+A again within 5 seconds to put everything back where it was.
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Gio from 'gi://Gio';
@@ -63,7 +63,7 @@ export class Arrange {
         });
         this._undo = {t: GLib.get_monotonic_time(), saved};
         Main.osdWindowManager.showAll(Gio.ThemedIcon.new('view-grid-symbolic'),
-            `Arranged ${wins.length} window${wins.length > 1 ? 's' : ''} · Super+A again to undo`, null, null);
+            `Arranged ${wins.length} window${wins.length > 1 ? 's' : ''} · Super+Shift+A again to undo`, null, null);
     }
 
     _restore() {

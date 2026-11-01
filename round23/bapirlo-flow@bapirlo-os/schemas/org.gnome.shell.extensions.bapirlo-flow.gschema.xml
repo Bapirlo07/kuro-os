@@ -13,7 +13,7 @@
       <summary>Window hints</summary></key>
     <key name="palette-key" type="as"><default><![CDATA[['<Super><Shift>p']]]></default>
       <summary>Command palette</summary></key>
-    <key name="arrange-key" type="as"><default><![CDATA[['<Super>a']]]></default>
+    <key name="arrange-key" type="as"><default><![CDATA[['<Super><Shift>a']]]></default>
       <summary>Arrange windows (again within 5 s = undo)</summary></key>
     <key name="watch-key" type="as"><default><![CDATA[['<Super><Shift>w']]]></default>
       <summary>Watch an area of the screen</summary></key>

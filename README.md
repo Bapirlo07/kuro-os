@@ -135,7 +135,7 @@ on/off and has a `demo` for each one.
 | Window hints | Super+; — a letter on every window, type it to jump |
 | Command palette | Super+Shift+P — app actions (GTK D-Bus actions + launcher actions), Kuro commands, settings, windows |
 | Text expander | `;key` + space in any Wayland text field, via the shell's input-method bridge (no daemon, skips passwords) |
-| One-key arrange | Super+A — tiles by count, most recent window biggest; again = undo |
+| One-key arrange | Super+Shift+A — tiles by count, most recent window biggest; again = undo |
 | Screen watch | Super+Shift+W — notify when a screen area changes |
 | Meeting mode | camera / mic call → banners held, music paused, call timer |
 | Text → task | Super+Shift+D — selected text → desk to-do with a parsed due date |

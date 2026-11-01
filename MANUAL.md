@@ -357,7 +357,7 @@ Get-things-done tools in one extension, `bapirlo-flow@bapirlo-os`. `bapirlo-flow
 - **Text expander.** Type a key such as `;ty` and a space (or Tab/Enter) in any text field: it becomes the snippet. Built in:
   `;date ;time ;now ;iso ;week ;shrug`. Yours: Kuro Settings → **Snippets**, or `bapirlo-snippets add ;sig "Best wishes"`.
   Never in password fields; terminals don't support it. *Off:* `bapirlo-flow expander off`.
-- **One-key arrange.** [[Super+A]] tiles the windows on the focused monitor (latest gets the biggest spot); again within 5 s = undo.
+- **One-key arrange.** [[Super+Shift+A]] tiles the windows on the focused monitor (latest gets the biggest spot); again within 5 s = undo.
 - **Screen watch.** [[Super+Shift+W]], drag a box: you get a notification (with a picture) when that area changes. ✕ on its tag stops it.
 - **Meeting mode.** Automatic when the camera is on or an app keeps the mic open 10 s: banners held, music paused, desk widgets and
   the creature hidden, a call timer under the bar. 20 s after the call everything is restored. *Off:* `bapirlo-flow meeting off`.

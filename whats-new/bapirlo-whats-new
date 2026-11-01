@@ -204,7 +204,7 @@ def features23(self):
         ("15", "One-key arrange",
          "Every window on this screen snaps into a tidy layout for how many there are — the one you used last "
          "gets the biggest spot.",
-         [("Super", "+", "A"), " · press it again within 5 s to undo"],
+         [("Super", "+", "Shift", "+", "A"), " · press it again within 5 s to undo"],
          [("Arrange now", lambda: self.later(flow("Arrange")), False)], None, None),
         ("16", "Screen watch",
          "Drag a box around any part of the screen and Kuro tells you when it changes — a build finishing, a "

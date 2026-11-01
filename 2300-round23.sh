@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Kuro OS round 23 — KURO FLOW (NO sudo):
 #   · Kuro Flow extension: window hints (Super+;), command palette (Super+Shift+P), text expander (;key + space),
-#     one-key arrange (Super+A), screen watch (Super+Shift+W), meeting mode, text → task (Super+Shift+D),
+#     one-key arrange (Super+Shift+A), screen watch (Super+Shift+W), meeting mode, text → task (Super+Shift+D),
 #     deep search in the overview, Autopilot (suggest-only)
 #   · bin/bapirlo-deepsearch + a 30-min idle user timer (local SQLite index of words inside your files)
 #   · bin/kuro-files: Files → right-click → Scripts → Kuro rename / convert / resize / zip / merge PDFs / clean photos
@@ -95,6 +95,6 @@ fi
 
 echo
 echo "Installed. Log out and back in once, then:"
-echo "   Super+;  hints · Super+Shift+P palette · Super+A arrange · Super+Shift+W watch · Super+Shift+D text → task"
+echo "   Super+;  hints · Super+Shift+P palette · Super+Shift+A arrange · Super+Shift+W watch · Super+Shift+D text → task"
 echo "   type ;mail then a space in any text box · right-click files → Scripts → Kuro …"
 echo "Undo: bash ~/bapirlo-os/2300-round23.sh restore"

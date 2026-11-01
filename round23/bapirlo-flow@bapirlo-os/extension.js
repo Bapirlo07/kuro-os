@@ -2,7 +2,7 @@
 //   hints.js       Super+;            a letter on every window — type it to jump there
 //   palette.js     Super+Shift+P      command palette: app actions, Kuro commands, settings, windows
 //   expander.js    ;key + space       text snippets in any app (~/.config/bapirlo/snippets.json)      expander
-//   arrange.js     Super+A            tile this workspace's windows sensibly (again = undo)
+//   arrange.js     Super+Shift+A            tile this workspace's windows sensibly (again = undo)
 //   watch.js       Super+Shift+W      watch a part of the screen, get told when it changes
 //   meeting.js     (automatic)        camera / mic call → quiet notifications, music paused, timer    meeting
 //   totask.js      Super+Shift+D      selected text → to-do with a due date
