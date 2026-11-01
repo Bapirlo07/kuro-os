@@ -32,7 +32,8 @@ Qt (Kvantum), the terminal, Spotify, Discord and Chrome.
 | **Gaming** | A fullscreen game turns on DND, holds the Performance profile and starts a 30 s instant-replay buffer on the iGPU encoder. MangoHud and an OBS hook are included |
 | **Laptop (MSI)** | `msi-ec` + `bapirlo-perfd`: Turbo on AC, Eco + silent fans on battery, 80 % charge limit |
 | **iPhone & Windows** | LocalSend (AirDrop-style), an AirPlay receiver, KDE Connect, an iCloud web app, AirPods battery (LibrePods), the Windows drive in Files (read-only by default, with a safety check), a shared folder, Bluetooth key sync, and one-shot *Restart to Windows* (EFI BootNext) |
-| **Productivity** | Kuro Writer (Claude rewrite + offline LanguageTool), Super+A Claude Code terminal, an encrypted Vault, a daily Downloads tidy, clipboard history, emoji picker, Satty screenshots |
+| **Productivity** | Kuro Writer (Claude rewrite + offline LanguageTool), Super+A Claude Code terminal, an encrypted Vault, a daily Downloads tidy, clipboard history, emoji picker, Satty screenshots, a colour picker (Super+Shift+C) and an on-screen **ruler** (Super+Shift+M: drag a box, its size is copied) |
+| **Kuro Settings** | One app for every Kuro extension (on/off plus its settings, made from each extension's own schema), the Gaming / Quiet / Do Not Disturb modes, tools, recent picked colours, and an **Undo** list of every backup with the exact command that puts it back |
 | **Air gestures** | Optional webcam hand control: swipe for workspaces, pinch to click or drag windows, palm for the desktop, fist for play/pause, thumbs for volume, ✌ to scroll or skip songs, 🤙 for the app grid. Off until you turn it on — [setup](#air-gestures-optional) |
 | **Staying healthy** | A Timeshift snapshot before every update (keeps 3). **Kuro Doctor** runs after every update and login, and tells you when an extension no longer supports the new GNOME. Spotify's theme is re-applied after Spotify updates. A monthly cleanup runs too |
 | **Docs** | A full plain-English manual in a themed **Kuro OS Guide** app ([MANUAL.md](MANUAL.md)) and a one-page [emergency sheet](EMERGENCY.md) ([PDF](EMERGENCY.pdf)) |
@@ -46,8 +47,9 @@ Everything is a plain script. Each one **backs up before it changes anything** (
 | <img src="screenshots/topbar.png" alt="Top bar"> | |
 | <img src="screenshots/control-centre.png" width="360" alt="Control Centre"> | <img src="screenshots/launchpad.jpg" width="520" alt="Launchpad"> |
 | <img src="screenshots/login.jpg" width="520" alt="Login screen"> | <img src="screenshots/welcome.png" width="360" alt="Kuro Welcome"> |
+| <img src="screenshots/settings.png" width="360" alt="Kuro Settings"> | <img src="screenshots/ruler.jpg" width="520" alt="Screen ruler"> |
 
-<sub>Screenshots use a neutral wallpaper. The real theme is generated from whatever picture you give the installer.</sub>
+<sub>Screenshots use the code-drawn Kuro OS wallpaper. The real theme is generated from whatever picture you give the installer.</sub>
 
 ## Install (fresh CachyOS + GNOME)
 
@@ -95,10 +97,53 @@ bapirlo-gestures on                       # or click the ✋ button at the top l
 | 👍 / 👎 keep holding | Volume up / down |
 | ✌ + move up / down · flick ← / → | Scroll · previous / next song |
 | 🤙 Shaka (thumb + pinky) | App grid — then point and pinch an icon |
+| 🤟 hold + draw a shape | ◯ search · ✓ screenshot · Z zoom canvas · △ apps · ^ overview · L lock |
 
 Change any of them in `~/.config/bapirlo/gestures.json` (`"actions"`: a built-in name, `"cmd:<command>"` or `"none"`).
 `bapirlo-gestures help` prints the list, `bapirlo-gestures off` stops it and releases the camera (it also lets go
 whenever the screen locks). Remove it with `bash gestures/setup.sh uninstall`.
+
+**Shoulder-surf guard** uses the same camera daemon: `bapirlo-guard on` blurs the screen and holds notifications
+while a second face is behind you (a face that never moves — a poster — is ignored after 30 s).
+
+## Kuro Cosmos (round 22)
+
+Eleven "cosmic" effects in one GNOME Shell extension (`round22/bapirlo-cosmos@bapirlo-os`), drawn on the GPU with Cogl
+shader snippets:
+
+| | |
+|---|---|
+| Black hole | throw a window diagonally into a corner → it spirals into a lensing black hole and closes |
+| Echo windows | closed windows leave a fading after-image with a ↺ Reopen button |
+| Supernova | critical notifications ripple across the screen as a shockwave |
+| Wormhole | workspace switches fly through a star tunnel |
+| Time dilation | hold Super+Shift+Z: slow-motion shell, precision pointer, half-speed media |
+| Breathing desktop | the wallpaper breathes at a calm pace (slower in focus / bedtime) |
+| Gravity wells | Super+Alt+P: windows orbit the focused "planet" window |
+| Shatter lock | the desktop cracks like glass when you lock, reassembles when you unlock |
+| Aurora sky | night-sky wallpaper: CPU = aurora, notifications = shooting stars, downloads = a comet |
+| Constellation | Super+Shift+Space: apps as stars, sized by use, linked by when you use them |
+| Living OS | dock glow / dust by use, a garden that grows on the wallpaper, moss on ignored folders |
+
+`bash 2200-round22.sh` installs it (no sudo), `bash 2200-round22.sh restore` removes it. `bapirlo-cosmos` switches parts
+on/off and has a `demo` for each one.
+
+## Kuro Flow (round 23)
+
+| | |
+|---|---|
+| Window hints | Super+; — a letter on every window, type it to jump |
+| Command palette | Super+Shift+P — app actions (GTK D-Bus actions + launcher actions), Kuro commands, settings, windows |
+| Text expander | `;key` + space in any Wayland text field, via the shell's input-method bridge (no daemon, skips passwords) |
+| One-key arrange | Super+A — tiles by count, most recent window biggest; again = undo |
+| Screen watch | Super+Shift+W — notify when a screen area changes |
+| Meeting mode | camera / mic call → banners held, music paused, call timer |
+| Text → task | Super+Shift+D — selected text → desk to-do with a parsed due date |
+| Deep search | "Inside your files" search results from a local SQLite FTS5 index (text, PDF, Office, OCR) |
+| Files power tools | Nautilus scripts: batch rename, convert, resize, zip, merge PDFs, strip photo metadata |
+| Autopilot | learns repeated habits and suggests automating them — suggest-only |
+
+`bash 2300-round23.sh` installs it (no sudo), `bash 2300-round23.sh restore` removes it.
 
 ## Layout
 

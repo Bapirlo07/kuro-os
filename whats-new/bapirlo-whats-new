@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Kuro OS — What's New (rounds 22 + 23).
+
+  bapirlo-whats-new          open it
+  bapirlo-whats-new --once   what the login autostart runs: opens only if you haven't seen this round yet
+                             (closing the window marks it seen; the search "what's new" reopens it any time)
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+ROUND = "round23"
+APP_ID = "os.bapirlo.WhatsNew"
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BIN = os.path.join(ROOT, "bin")
+STATE = os.path.join(GLib.get_user_state_dir(), "bapirlo")
+SEEN = os.path.join(STATE, "whats-new-seen")
+WORLD = os.path.expanduser("~/Pictures/wallpapers/bapirlo/kuro-world.png")
+
+CSS = """
+window.kuro-new { background-color: #0E0A0D; color: #F2E9EC; }
+.hero {
+  background-image: linear-gradient(160deg, rgba(225,29,46,0.34), rgba(14,10,13,0.0) 70%),
+                    radial-gradient(circle at 12% 0%, rgba(255,70,85,0.30), transparent 55%);
+  border: 1px solid rgba(225,29,46,0.28); border-radius: 16px; padding: 22px 26px;
+}
+.brand { font-family: Bangers; font-size: 15pt; letter-spacing: 3px; color: #FF4655; }
+.title { font-family: Bangers; font-size: 40pt; letter-spacing: 2px; color: #FFFFFF;
+         text-shadow: 3px 3px 0 #7A0F1A; }
+.sub { color: #CAB5BF; font-weight: 600; font-size: 12pt; }
+.card { background-color: rgba(22,16,21,0.94); border: 1px solid rgba(225,29,46,0.28);
+        border-radius: 16px; padding: 16px 18px; }
+.num { font-family: Bangers; font-size: 26pt; color: #FF4655; min-width: 38px; }
+.heading { font-family: Bangers; font-size: 17pt; letter-spacing: 1.2px; color: #FFFFFF; }
+.what { color: #F2E9EC; font-size: 11pt; }
+.how { color: #CAB5BF; font-size: 10pt; }
+.key { font-family: monospace; font-weight: 700; color: #FF4655; background-color: rgba(225,29,46,0.12);
+       border-radius: 6px; padding: 1px 6px; }
+.state { font-family: Bangers; letter-spacing: 1px; font-size: 11pt; color: #857079; }
+.state.on { color: #3FC69A; }
+.note { color: #FFB020; font-size: 9.5pt; font-weight: 600; }
+button.kuro { border-radius: 10px; padding: 7px 14px; background-color: rgba(242,233,236,0.07);
+              color: #F2E9EC; font-weight: 600; transition: 180ms; }
+button.kuro:hover { background-color: rgba(225,29,46,0.22); }
+button.kuro.accent { background-color: #E11D2E; color: #FFFFFF; }
+button.kuro.accent:hover { background-color: #FF4655; }
+switch:checked { background-color: #E11D2E; }
+.footer { color: #857079; font-size: 9.5pt; }
+"""
+
+
+def launch(cmd):
+    try:
+        subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def out(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def b(name):
+    return os.path.join(BIN, name)
+
+
+def gdbus(dest, path, method):
+    launch(["gdbus", "call", "--session", "-d", dest, "-o", path, "-m", method])
+
+
+def terminal(title, *cmd):
+    term = shutil.which("alacritty")
+    if term:
+        launch([term, "-T", title, "-e", *cmd])
+    else:
+        launch(["kgx", "--", *cmd])
+
+
+def phone_state():
+    """'connected NAME' | 'paired NAME' | ''"""
+    o = out(["gdbus", "call", "--session", "-d", "org.gnome.Shell.Extensions.GSConnect",
+             "-o", "/org/gnome/Shell/Extensions/GSConnect", "-m", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"])
+    import re
+    name = re.search(r"'Name': <'([^']+)'>", o)
+    if not name:
+        return ""
+    return ("connected " if "'Connected': <true>" in o else "paired ") + name.group(1)
+
+
+# (number, title, what it is, how to use it, buttons [(label, fn, accent)], service-switch or None, note)
+# service-switch: "bapirlo-x" or "bapirlo-x PART" → runs bin/bapirlo-x [PART] on|off|status
+COSMOS = "bapirlo-cosmos"
+
+
+def cosmos(*args):
+    return lambda: launch([b(COSMOS), *args])
+
+
+def features(self):
+    return [
+        ("1", "Black hole",
+         "Fling a window hard into any corner of the screen and a black hole opens there. The window spirals in, "
+         "everything around it bends, the hole collapses with a flash and the screen shakes. Then the window "
+         "is closed for real.",
+         ["Drag a window and let go while it's still flying fast toward a corner"],
+         [("Feed it a window", lambda: self.later(cosmos("demo", "blackhole", "tr")), True)],
+         "bapirlo-cosmos blackhole", "If the app asks \"save changes?\", the window comes back."),
+        ("2", "Living OS",
+         "Your desktop grows with you. A little garden grows along the bottom corners of the wallpaper: one more "
+         "sprout per day you use the computer, flowers after two weeks. Apps you use the most glow on the dock, "
+         "pinned apps you ignore gather dust, and folders you haven't touched in a month grow moss.",
+         ["Mossy folders: a notification offers ", ("Tidy up",), " — Open · Keep · Archive · Bin"],
+         [("Tidy up now", cosmos("tidy"), False)],
+         "bapirlo-cosmos living", "Moss is only an icon — nothing inside a folder is ever changed."),
+        ("3", "Time dilation",
+         "Hold the keys and time slows down: every animation runs five times slower, the pointer goes into "
+         "precision mode for pixel-exact drags, media players that allow it play at half speed, and the edges "
+         "of the screen turn deep blue.",
+         ["Hold ", ("Super", "+", "Shift", "+", "Z"), " · let go of ", ("Super",), " to come back"],
+         [], None, None),
+        ("4", "Gravity wells",
+         "Make a window a planet and every other window on that workspace swings into orbit around it — and "
+         "every window you open there afterwards joins. Drag the planet and its moons follow; drag a moon far "
+         "away and it leaves orbit.",
+         [("Super", "+", "Alt", "+", "P"), " on the focused window · again to release everything"],
+         [], None, None),
+        ("5", "Shatter lock",
+         "Lock the screen and your desktop cracks like glass from where the pointer is, then falls away to the "
+         "lock screen. Unlock and the pieces fly back together.",
+         ["The lock happens first and instantly — the glass is only drawn on top"],
+         [("Preview", lambda: self.later(lambda: (cosmos("demo", "shatter")(),
+                                                 GLib.timeout_add(2300, lambda: (cosmos("demo", "unshatter")(), False)[1]))), True)],
+         "bapirlo-cosmos shatter", None),
+        ("6", "Aurora sky",
+         "A living night-sky wallpaper that's also a quiet system monitor: the aurora gets brighter and faster "
+         "when the CPU is busy, every notification is a shooting star, and a comet crosses the sky while "
+         "something downloads.",
+         ["Turn it on here (your normal wallpaper comes back when it's off)"],
+         [("Shooting star", cosmos("demo", "star"), False)],
+         "bapirlo-cosmos aurora", "Draws at 30 frames a second and pauses when a maximised window covers it."),
+        ("7", "Echo windows",
+         "Close a window and a faint after-image of it lingers for a few seconds, drifting up. Click ↺ Reopen on "
+         "it if you closed it by mistake.",
+         ["Hovering the Reopen button keeps the echo there"],
+         [], "bapirlo-cosmos echo", None),
+        ("8", "Constellation",
+         "Your apps as a night sky: bigger, brighter stars for apps you use more, faint lines between apps you "
+         "use on the same days. Type and the matching stars flare up — Enter launches.",
+         [("Super", "+", "Shift", "+", "Space")],
+         [("Open it", lambda: self.later(cosmos("demo", "stars")), True)], None, None),
+        ("9", "Wormhole",
+         "Switching workspace flies you through a short star tunnel.",
+         [("Super", "+", "Page Up/Down"), " or swipe — any workspace switch"],
+         [("Fly", lambda: self.later(cosmos("demo", "wormhole")), False)], "bapirlo-cosmos wormhole", None),
+        ("10", "Supernova",
+         "Urgent notifications (battery critically low, incoming calls) burst out of the island as a shockwave "
+         "that ripples across your windows. Normal notifications stay quiet.",
+         [],
+         [("Show me", lambda: self.later(cosmos("demo", "supernova")), False)], "bapirlo-cosmos supernova", None),
+        ("11", "Breathing desktop",
+         "The wallpaper slowly swells and settles at a calm six breaths a minute — slower during a focus block "
+         "or bedtime. Breathe along with it.",
+         [], [], "bapirlo-cosmos breathe", "Subtle on purpose. Windows never move."),
+    ]
+
+
+FLOW = "bapirlo-flow"
+
+
+def flow(method):
+    return lambda: gdbus("org.bapirlo.Flow", "/org/bapirlo/Flow", f"org.bapirlo.Flow.{method}")
+
+
+def settings_page(page):
+    return lambda: launch([os.path.join(ROOT, "settings-app", "bapirlo-settings"), f"--page={page}"])
+
+
+def features23(self):
+    return [
+        ("12", "Window hints",
+         "A letter appears on every window — type it and you're there. No mouse, no Alt+Tab-ing through ten windows.",
+         [("Super", "+", ";"), " · Esc cancels"],
+         [("Try it", lambda: self.later(flow("Hints")), True)], None, None),
+        ("13", "Command palette",
+         "One box that runs anything by name: the focused app's own actions (New private window, Export…), every "
+         "Kuro command, dark mode, every Settings page and your open windows. Fuzzy — \"nwpr\" finds New Private Window.",
+         [("Super", "+", "Shift", "+", "P"), " · ↑↓ · Enter · ", ("Alt", "+", "1…9")],
+         [("Open it", lambda: self.later(flow("Palette")), True)], None, None),
+        ("14", "Text expander",
+         "Type a short key and a space in any app and it turns into the full text: ;addr → your address, "
+         ";mail → your email. Built in: ;date ;time ;now ;shrug.",
+         ["Your own snippets: ", ("Kuro Settings → Snippets",), " · never in password boxes or terminals"],
+         [("Edit snippets", settings_page("snippets"), True)], "bapirlo-flow expander", None),
+        ("15", "One-key arrange",
+         "Every window on this screen snaps into a tidy layout for how many there are — the one you used last "
+         "gets the biggest spot.",
+         [("Super", "+", "A"), " · press it again within 5 s to undo"],
+         [("Arrange now", lambda: self.later(flow("Arrange")), False)], None, None),
+        ("16", "Screen watch",
+         "Drag a box around any part of the screen and Kuro tells you when it changes — a build finishing, a "
+         "reply arriving, a price dropping.",
+         [("Super", "+", "Shift", "+", "W"), " then drag · ✕ on its tag stops watching"],
+         [("Watch something", lambda: self.later(flow("Watch")), True)], None, None),
+        ("17", "Meeting mode",
+         "Starts by itself when the camera comes on or an app holds the microphone: notifications go quiet, "
+         "music pauses, the desk widgets step aside and a call timer appears. Everything comes back after.",
+         ["\"Not a meeting\" on the timer switches it off for that call"],
+         [], "bapirlo-flow meeting", None),
+        ("18", "Files power tools",
+         "Right-click files → Scripts: rename many at once (with a live preview), convert or resize pictures, "
+         "zip, merge PDFs, and make copies of photos without the camera and GPS data.",
+         ["Nothing is ever overwritten — a clash gets \" (2)\""],
+         [], None, None),
+        ("19", "Deep search",
+         "Search finds files by what's INSIDE them — documents, PDFs, Office files and even the words in your "
+         "screenshots — in a section called \"Inside your files\".",
+         ["Indexed on this computer every 30 min · ", ("bapirlo-deepsearch status",)],
+         [], "bapirlo-flow deep-search", "The first index runs a few minutes after you log in."),
+        ("20", "Text → task",
+         "Select any text and press the keys: it lands on your desk To-do card, with a due day when the words "
+         "say one (\"by Friday\", \"tomorrow\", \"12 Nov\").",
+         [("Super", "+", "Shift", "+", "D")], [], None, None),
+        ("21", "Autopilot",
+         "Kuro notices what you do again and again — the same apps every morning, the same folder for your PDFs "
+         "— and offers to do it for you. It only ever asks; nothing happens until you say yes.",
+         [("bapirlo-autopilot list",), " shows what it learnt and the rules you accepted"],
+         [], "bapirlo-flow autopilot", None),
+    ]
+
+
+class WhatsNew(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        if getattr(self, "win", None):
+            self.win.present()
+            return
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        prov = Gtk.CssProvider()
+        prov.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.win = Adw.ApplicationWindow(application=self, title="What's new in Kuro OS", default_width=980,
+                                         default_height=860)
+        self.win.add_css_class("kuro-new")
+        self.win.connect("close-request", self.on_close)
+        view = Adw.ToolbarView()
+        hb = Adw.HeaderBar(show_title=False)
+        hb.add_css_class("flat")
+        view.add_top_bar(hb)
+        self.toast = Adw.ToastOverlay()
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_start=26, margin_end=26,
+                       margin_bottom=26)
+        scroll.set_child(Adw.Clamp(maximum_size=1000, child=page))
+        self.toast.set_child(scroll)
+        view.set_content(self.toast)
+        self.win.set_content(view)
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        hero.add_css_class("hero")
+        hero.append(self.label("KURO OS · ROUNDS 22 + 23 · COSMOS & FLOW", "brand"))
+        hero.append(self.label("What's new", "title"))
+        hero.append(self.label("Eleven cosmic upgrades and ten that get things done faster. Everything with a "
+                               "switch is on except the aurora sky — flip any of them here.", "sub", wrap=True))
+        page.append(hero)
+
+        self.switches = {}
+        self._syncing = False
+        page.append(self.label("COSMOS", "brand", margin_top=6))
+        for num, title, what, how, buttons, service, note in features(self):
+            page.append(self.card(num, title, what, how, buttons, service, note))
+        page.append(self.label("FLOW", "brand", margin_top=14))
+        for num, title, what, how, buttons, service, note in features23(self):
+            page.append(self.card(num, title, what, how, buttons, service, note))
+
+        foot = Gtk.Box(spacing=10, margin_top=6)
+        foot.append(self.label("Open this again any time: type “what's new” in search.", "footer", hexpand=True))
+        done = Gtk.Button(label="Got it")
+        done.add_css_class("kuro")
+        done.add_css_class("accent")
+        done.connect("clicked", lambda *_: self.win.close())
+        foot.append(done)
+        page.append(foot)
+
+        self.win.present()
+        GLib.timeout_add_seconds(3, self.refresh)
+
+    # ---------- pieces ----------
+    def label(self, text, *css, wrap=False, xalign=0.0, **kw):
+        lbl = Gtk.Label(label=text, xalign=xalign, wrap=wrap, **kw)
+        if wrap:
+            lbl.set_wrap_mode(2)            # WORD_CHAR
+        for c in css:
+            lbl.add_css_class(c)
+        return lbl
+
+    def how_row(self, parts):
+        """Plain text with keys / commands (tuples) highlighted."""
+        text = []
+        for p in parts:
+            if isinstance(p, tuple):
+                text.append(" ".join(k if k == "+" else
+                                     f'<span font_family="monospace" weight="bold" foreground="#FF4655">'
+                                     f'{GLib.markup_escape_text(k)}</span>' for k in p))
+            else:
+                text.append(GLib.markup_escape_text(p))
+        lbl = Gtk.Label(xalign=0, wrap=True)
+        lbl.set_markup("".join(text))
+        lbl.add_css_class("how")
+        return lbl
+
+    def card(self, num, title, what, how, buttons, service, note):
+        c = Gtk.Box(spacing=14)
+        c.add_css_class("card")
+        c.append(self.label(num, "num", valign=Gtk.Align.START))
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True)
+        top = Gtk.Box(spacing=10)
+        top.append(self.label(title, "heading", hexpand=True))
+        if service:
+            st = self.label("", "state")
+            sw = Gtk.Switch(valign=Gtk.Align.CENTER)
+            sw.connect("state-set", lambda s, on, svc=service: self.toggle(svc, on))
+            top.append(st)
+            top.append(sw)
+            self.switches[service] = (sw, st)
+        col.append(top)
+        col.append(self.label(what, "what", wrap=True))
+        col.append(self.how_row(how))
+        if note:
+            col.append(self.label(note, "note", wrap=True))
+        if buttons:
+            row = Gtk.Box(spacing=8, margin_top=4)
+            for text, fn, accent in buttons:
+                bt = Gtk.Button(label=text)
+                bt.add_css_class("kuro")
+                if accent:
+                    bt.add_css_class("accent")
+                bt.connect("clicked", lambda *_, f=fn: f())
+                row.append(bt)
+            col.append(row)
+        c.append(col)
+        if service:
+            self.refresh_one(service)
+        return c
+
+    # ---------- actions ----------
+    def later(self, fn):
+        """Things that happen on the desktop: tuck this window away first."""
+        self.win.minimize()
+        GLib.timeout_add(450, lambda: (fn(), False)[1])
+
+    def cmd(self, service, *args):
+        first, *rest = service.split()
+        return [b(first), *rest, *args]
+
+    def toggle(self, service, on):
+        if self._syncing:
+            return False
+        launch(self.cmd(service, "on" if on else "off"))
+        GLib.timeout_add(1500, lambda: (self.refresh_one(service), False)[1])
+        return False
+
+    def refresh_one(self, service):
+        sw, st = self.switches[service]
+        on = out(self.cmd(service, "status")) == "on"
+        if sw.get_active() != on:
+            self._syncing = True                 # showing the real state must not flip the service
+            sw.set_active(on)
+            self._syncing = False
+        st.set_label("ON" if on else "OFF")
+        (st.add_css_class if on else st.remove_css_class)("on")
+
+    def refresh(self):
+        if not getattr(self, "win", None):
+            return False
+        for svc in self.switches:
+            self.refresh_one(svc)
+        return True
+
+    def check_phone(self):
+        s = phone_state()
+        if s.startswith("connected"):
+            msg = f"📱 {s[10:]} is connected — throw a window at the top edge!"
+        elif s.startswith("paired"):
+            msg = f"📱 {s[7:]} is paired but not connected — open KDE Connect on it"
+        else:
+            msg = "📱 No phone paired in GSConnect yet"
+        self.toast.add_toast(Adw.Toast(title=msg, timeout=5))
+
+    def on_close(self, *_):
+        os.makedirs(STATE, exist_ok=True)
+        with open(SEEN, "w", encoding="utf-8") as f:
+            f.write(ROUND + "\n")
+        return False
+
+
+def main():
+    if "--once" in sys.argv:
+        try:
+            with open(SEEN, encoding="utf-8") as f:
+                if f.read().strip() == ROUND:
+                    return 0
+        except OSError:
+            pass
+        sys.argv.remove("--once")
+    return WhatsNew().run(sys.argv[:1])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

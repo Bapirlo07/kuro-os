@@ -209,7 +209,8 @@ Commands in `code` go in a terminal (Alacritty, or the drop-down one on [[Super+
 | [[Super+Alt+I]] | Pop the window out as a live picture-in-picture / close it |
 | [[Super+Alt+L]] | Next top-bar look |
 | [[Super+Alt+V]] | Vault lock / unlock |
-| [[Super+Alt+F]] | Focus timer: start a 25 min block / stop |
+| [[Super+Alt+F]] | Focus timer: start a 25 min block / stop (with the focus tunnel) |
+| [[Super+Alt+X]] (hold) | X-ray peek: see what's behind the window under the pointer |
 | [[Super+Alt+T]] | Wallpapers → Theme tab (Theme Studio) |
 | [[Super+Alt+P]] | Wallpapers → Wallpapers tab |
 | [[Super+Alt+N]] | Next wallpaper |
@@ -303,6 +304,75 @@ with `bash ~/bapirlo-os/<script>.sh restore`. For an extension the quick off swi
 - **Privacy dots.** A red dot means the microphone is on, green means the camera, blue means screen sharing. They sit in the system capsule. Part of Kuro Desk.
 - **Session restore.** After login, the apps you had open come back on their workspaces. *Off:* disable `bapirlo-session@bapirlo-os` and `SmartAutoMoveNG@lauinger-clan.de`.
 
+### Kuro Lens (round 21)
+
+- **X-ray peek.** Hold [[Super+Alt+X]]: a round lens at the pointer shows the windows and desktop underneath the
+  window you're over. Let go of Super to close it. *Lens size:* `gsettings set org.gnome.shell.extensions.bapirlo-lens xray-radius 220`
+  (needs `--schemadir ~/.local/share/gnome-shell/extensions/bapirlo-lens@bapirlo-os/schemas`).
+- **Window shelf.** Fling a window fast sideways into the left or right screen edge: it's minimised and a live thumbnail
+  peeks out of that edge. Hover = it slides out, click = the window comes back where it was, middle-click = close it.
+  *Off:* set the `shelf` key to false (same schema as above).
+- **Focus tunnel.** While a focus block runs ([[Super+Alt+F]]) everything but the focused window fades back behind a dark
+  blur, and when it ends Kuro says how many notifications waited. *Off:* key `tunnel` false; `tunnel-blur` false = dim only (cheaper).
+- **Air-draw.** With air gestures on, hold 🤟 and draw in the air: ◯ search, ✓ screenshot, Z zoom canvas, △ apps,
+  ^ overview, L lock. Change them in `~/.config/bapirlo/gestures.json` → `"draw"`.
+
+### Kuro Cosmos (round 22)
+
+All of these live in one extension, `bapirlo-cosmos@bapirlo-os`. `bapirlo-cosmos` shows which are on and
+`bapirlo-cosmos PART on|off` switches one (PART = blackhole echo supernova wormhole breathe shatter aurora living).
+Kuro Settings → Extensions → Kuro Cosmos has the same switches.
+
+- **Black hole.** Throw a window hard *diagonally* into a screen corner and a black hole swallows it: the window is closed
+  (if the app asks to save, the window comes back). Sideways throws still go to the window shelf.
+  Try it safely: `bapirlo-cosmos demo blackhole` feeds it a throwaway window of its own.
+- **Echo windows.** A closed window leaves a fading after-image for ~5 s, with a **↺ Reopen** pill that opens the app again.
+- **Supernova.** Critical notifications (battery very low, incoming calls) burst out of the island as a shockwave.
+- **Wormhole.** Workspace switches fly through a short star tunnel.
+- **Time dilation.** Hold [[Super+Shift+Z]]: animations ×5 slower, precision pointer, media at half speed (players that
+  allow it). Let go of Super to end. `bapirlo-cosmos slow on|off` does it without holding keys.
+- **Breathing desktop.** The wallpaper gently breathes (6 breaths/min, slower during focus or bedtime).
+- **Gravity wells.** [[Super+Alt+P]] makes the focused window a planet: the others (and new ones) orbit it. Drag a moon far
+  away to free it; [[Super+Alt+P]] on the planet again sends everything home.
+- **Shatter lock.** Locking cracks the desktop like glass; unlocking puts it back together. The lock itself is instant, and
+  nothing is drawn when locking for suspend or after idling.
+- **Aurora sky** (off by default: `bapirlo-cosmos aurora on`). A night-sky wallpaper: the aurora follows CPU load, each
+  notification is a shooting star, and a comet crosses while something downloads into ~/Downloads.
+- **Constellation.** [[Super+Shift+Space]]: your apps as stars, bigger for apps you use more, linked when you use them on the
+  same days. Type to light stars up, [[Enter]] launches, [[Esc]] closes.
+- **Living OS.** Apps you use most glow on the dock; pinned apps unused for 2 weeks gather dust; a garden grows along the bottom
+  corners of the wallpaper (a sprout per day you use the computer, flowers after two weeks). Folders untouched for 30/90/180
+  days get a mossy icon (daily `bapirlo-living.timer`); `bapirlo-cosmos tidy` lists them with Open · Keep · Archive (→ ~/Archive)
+  · Bin. Moss is only Files' custom-icon metadata: `bapirlo-living clear` removes it everywhere.
+- *Remove all of round 22:* `bash ~/bapirlo-os/2200-round22.sh restore`.
+
+### Kuro Flow (round 23)
+
+Get-things-done tools in one extension, `bapirlo-flow@bapirlo-os`. `bapirlo-flow` shows the switches.
+
+- **Window hints.** [[Super+;]]: every window gets a letter (minimised ones in a strip at the bottom). Type it to jump there; [[Esc]] cancels.
+- **Command palette.** [[Super+Shift+P]]: run anything by name: the focused app's actions (launcher actions + the actions GTK
+  apps publish), every Kuro command, dark/light mode, night light, every Settings page, your open windows. Fuzzy matching;
+  [[↑]]/[[↓]] and [[Enter]], or [[Alt+1…9]].
+- **Text expander.** Type a key such as `;ty` and a space (or Tab/Enter) in any text field: it becomes the snippet. Built in:
+  `;date ;time ;now ;iso ;week ;shrug`. Yours: Kuro Settings → **Snippets**, or `bapirlo-snippets add ;sig "Best wishes"`.
+  Never in password fields; terminals don't support it. *Off:* `bapirlo-flow expander off`.
+- **One-key arrange.** [[Super+A]] tiles the windows on the focused monitor (latest gets the biggest spot); again within 5 s = undo.
+- **Screen watch.** [[Super+Shift+W]], drag a box: you get a notification (with a picture) when that area changes. ✕ on its tag stops it.
+- **Meeting mode.** Automatic when the camera is on or an app keeps the mic open 10 s: banners held, music paused, desk widgets and
+  the creature hidden, a call timer under the bar. 20 s after the call everything is restored. *Off:* `bapirlo-flow meeting off`.
+- **Text → task.** Select text, [[Super+Shift+D]]: a to-do on the desk card, with a due day if the text says one ("by Friday",
+  "tomorrow", "12 Nov", "25/11"). `bapirlo-todo add --due 2026-11-06 …` works too.
+- **Deep search.** Search shows **Inside your files**: files whose contents match (documents, PDFs, Office files, words in
+  screenshots via OCR). Index: `bapirlo-deepsearch status`, refreshed every 30 min by `bapirlo-deepsearch.timer` at idle priority;
+  `bapirlo-deepsearch forget` deletes it.
+- **Files power tools.** Files → right-click → **Scripts** → Kuro: Rename… (batch, live preview), Convert to PNG/JPG/WebP, Resize,
+  Compress to ZIP, Merge PDFs, Copy without photo metadata. Never overwrites. `kuro-files uninstall` removes the entries.
+- **Autopilot.** Notices repeated habits (apps you open together, apps at the same time on weekdays, the folder you always move a
+  file type to) and asks once whether to automate it. Only rules you accept run. `bapirlo-autopilot list` / `forget ID` /
+  `reset`. *Off:* `bapirlo-flow autopilot off`.
+- *Remove all of round 23:* `bash ~/bapirlo-os/2300-round23.sh restore`.
+
 ### Power, performance & games
 
 - **Power modes (bapirlo-perfd).** On mains power it picks Performance (MSI Turbo); on battery it picks Power Saver (Eco + silent fans).
@@ -328,6 +398,13 @@ with `bash ~/bapirlo-os/<script>.sh restore`. For an extension the quick off swi
 - **Downloads tidy.** Runs once a day and moves loose files into folders. Installers older than 30 days go to the Bin, never deleted.
   *Duplicates:* identical files (e.g. `CV.pdf` and `CV (1).pdf`) keep one copy and the rest go to the Bin. Run `bapirlo-tidy --dupes` to do it right now, or `bapirlo-tidy --dupes --dry-run` to just see the list.
   *Off:* `systemctl --user disable --now bapirlo-tidy.timer`.
+- **Shoulder-surf guard.** When the webcam sees a second face behind you, the screen blurs and notification
+  banners wait until it's gone. Click the blur = "it's fine" for 2 minutes. A face that never moves for 30 s (a poster) is ignored.
+  It shares the camera daemon with air gestures; nothing is saved or sent. *On / off:* `bapirlo-guard on|off`, `bapirlo-guard snooze 30`.
+- **Security pass (round 21).** `sudo bash ~/bapirlo-os/2100-round21-security.sh` turns on: private DNS (Cloudflare + Quad9,
+  encrypted when the network allows it; LLMNR off), a made-up Wi-Fi MAC per network (your home Wi-Fi keeps the real one),
+  USBGuard (new USB devices are blocked until you click *Allow once* / *Always allow* in the popup — `kuro-usb-guard` service)
+  and AppArmor (after a reboot). Kuro Doctor's *Security* section shows what's on. *Undo:* `sudo bash ~/bapirlo-os/2100-round21-security.sh restore`.
 - **Firewall.** Blocks everything coming in. Only phone sharing, Steam LAN and mDNS are allowed, and only from home networks. *Check:* `sudo ufw status`.
 
 ### Keeping it healthy
