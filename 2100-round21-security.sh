@@ -19,11 +19,13 @@
 #                    checked before it replaces the real one). Active after the next reboot.
 #  5. arch-audit  -> lists installed packages with known security holes; Kuro Doctor shows the count.
 # Never touches partitions, the EFI partition, grub-install, the firewall or user files.
-# Backup + log: ~/theme-backups/LATEST-SECURITY
+# Backup + log: ~/theme-backups/LATEST-SECURITY (this run) — `restore` uses ORIGINAL-SECURITY: the
+# backup from the FIRST run, taken before anything was changed, so running this again never spoils the undo.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "Run with sudo."; exit 1; }
 U=${SUDO_USER:?run via sudo}; U_HOME=$(getent passwd "$U" | cut -d: -f6); U_ID=$(id -u "$U")
 LATEST=$U_HOME/theme-backups/LATEST-SECURITY
+ORIG=$U_HOME/theme-backups/ORIGINAL-SECURITY
 RESOLVED_D=/etc/systemd/resolved.conf.d/50-kuro-privacy.conf
 NM_D=/etc/NetworkManager/conf.d/50-kuro-privacy.conf
 POLKIT=/etc/polkit-1/rules.d/70-kuro-usbguard.rules
@@ -53,7 +55,8 @@ grub_rebuild() {  # grub_rebuild BACKUP_DIR — temp file, checked, then swapped
 
 # ======================================================================================== restore
 if [ "${1:-}" = restore ]; then
-    BK=$(readlink -f "$LATEST"); [ -d "$BK" ] || { echo "No backup at $LATEST"; exit 1; }
+    BK=$(readlink -f "$ORIG" 2>/dev/null); [ -d "$BK" ] || BK=$(readlink -f "$LATEST")
+    [ -d "$BK" ] || { echo "No backup at $ORIG or $LATEST"; exit 1; }
     say "Restoring from $BK"
     rm -f "$RESOLVED_D"; systemctl restart systemd-resolved
     rm -f "$NM_D"
@@ -72,6 +75,7 @@ if [ "${1:-}" = restore ]; then
         grub_rebuild "$BK" "" || { echo "!! grub rebuild failed — /etc/default/grub restored but grub.cfg unchanged"; }
     fi
     as_user systemctl --user stop kuro-usb-guard.service 2>/dev/null || true
+    rm -f "$ORIG"   # next install takes a fresh original
     say "Restored. (usbguard / apparmor / arch-audit packages are still installed, just off.) Reboot to drop AppArmor."
     exit 0
 fi
@@ -84,6 +88,7 @@ cp -a /etc/default/grub "$BK/etc-default-grub"
 [ -f "$UG_CONF" ] && cp -a "$UG_CONF" "$BK/usbguard-daemon.conf"
 resolvectl status > "$BK/resolvectl-before.txt" 2>&1 || true
 chown -R "$U:" "$BK"; ln -sfn "$BK" "$LATEST"; chown -h "$U:" "$LATEST"
+[ -e "$ORIG" ] || { ln -sfn "$BK" "$ORIG"; chown -h "$U:" "$ORIG"; }   # first run only
 say "Backup: $BK"
 
 dns_works || { echo "!! DNS isn't working even before any change — connect to a network first."; exit 1; }
