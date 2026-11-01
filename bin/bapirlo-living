@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Kuro OS — Living OS: folders you ignore gather moss.
+
+  bapirlo-living scan [--notify]   look at your folders, give ignored ones a mossy icon (daily timer)
+  bapirlo-living tidy              the Tidy-up window: every mossy folder, its size, and what to do with it
+  bapirlo-living status            print what's mossy (JSON)
+  bapirlo-living clear             take all moss off again (uninstall)
+
+A folder's "last touched" = the newest change inside it (3 levels deep) or the last time you opened a
+file in it (GNOME's recent files). Untouched for 30 days = a little moss, 90 = mossy, 180 = overgrown.
+The moss is only an icon (Files' "custom icon" metadata, set only on folders that had none) — nothing
+inside is ever changed. Use a folder again and its moss is gone at the next scan.
+Tidy up: Open · Keep (no moss for 6 months) · Archive (moves it into ~/Archive, reversible) · Bin (Trash).
+State: ~/.local/state/bapirlo/living.json
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "bapirlo/living.json"
+ICONS = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "bapirlo/living"
+RECENT = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "recently-used.xbel"
+BASE_ICON = [Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "icons/Bapirlo/scalable/places/folder.svg",
+             Path("/usr/share/icons/Adwaita/scalable/places/folder.svg")]
+DAY = 86400
+LEVELS = [(180, 3), (90, 2), (30, 1)]
+WATCH_INSIDE = ["Documents", "Projects", "Pictures", "Videos", "Music", "Desktop", "Downloads"]
+SKIP_TOP = {"Templates", "Public", "Desktop", "Downloads", "Documents", "Pictures", "Videos", "Music", "Projects",
+            "Applications", "go", "Vault", "Archive", "snap"}
+SCAN_LIMIT = 4000
+KEY = "metadata::custom-icon"
+
+
+def load():
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {"ours": {}, "keep": {}, "folders": []}
+
+
+def save(st):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1))
+    tmp.replace(STATE)
+
+
+# ------------------------------------------------------------------ the moss icons
+MOSS = {
+    1: """<g opacity=".95"><path d="M4 27c3-3 6-1 8-3s5 1 7-1 4 2 6 0 3 1 4 0v3H4z" fill="#3f7d2a"/>
+<circle cx="9" cy="26" r="2.2" fill="#5fa83a"/><circle cx="16" cy="25.6" r="1.6" fill="#6cbf43"/></g>""",
+    2: """<g opacity=".97"><path d="M3 28c2-4 6-2 8-4 2-3 5 0 7-2s4 1 6-1 4 2 6 0 4 1 6-1 4 2 6 0 4 1 6-1 4 2 6 0v6H3z" fill="#356f24"/>
+<circle cx="8" cy="26" r="2.6" fill="#5fa83a"/><circle cx="15" cy="25" r="2" fill="#6cbf43"/><circle cx="27" cy="25.6" r="2.3" fill="#58a035"/>
+<circle cx="40" cy="25.3" r="1.8" fill="#6cbf43"/><path d="M5 52c2-3 5-2 7-4 1 3 3 3 5 4z" fill="#3f7d2a"/>
+<g fill="#cfc8b8" opacity=".55"><circle cx="30" cy="38" r=".6"/><circle cx="44" cy="44" r=".5"/><circle cx="22" cy="46" r=".6"/><circle cx="51" cy="35" r=".5"/></g></g>""",
+    3: """<g><path d="M2 29c2-5 6-3 8-5 2-4 5-1 7-3s4 1 6-2 4 2 6 0 4 2 6-1 4 2 6 0 4 1 6-1 4 2 7 1v8H2z" fill="#2e6420"/>
+<circle cx="8" cy="25.6" r="3" fill="#5fa83a"/><circle cx="15" cy="24.6" r="2.4" fill="#6cbf43"/><circle cx="24" cy="25" r="2.8" fill="#58a035"/>
+<circle cx="33" cy="24.4" r="2.2" fill="#6cbf43"/><circle cx="44" cy="25" r="2.6" fill="#5fa83a"/><circle cx="55" cy="25.5" r="2.2" fill="#6cbf43"/>
+<path d="M4 54c1-5 5-4 7-7 2 4 5 4 8 7z" fill="#356f24"/><path d="M48 54c2-4 5-3 7-6 1 3 3 4 5 6z" fill="#356f24"/>
+<path d="M57 30c1 6-2 9 0 14" stroke="#3f7d2a" stroke-width="1.4" fill="none"/><circle cx="57.4" cy="36" r="1.4" fill="#6cbf43"/><circle cx="56.6" cy="42" r="1.2" fill="#6cbf43"/>
+<g transform="translate(47 47)"><rect x="-.8" y="0" width="1.6" height="4" fill="#efe6d6"/><path d="M-3.5 .5a3.5 2.6 0 0 1 7 0z" fill="#e4003d"/>
+<circle cx="-1.2" cy="-.6" r=".5" fill="#fff"/><circle cx="1.3" cy="-.3" r=".4" fill="#fff"/></g>
+<g fill="#cfc8b8" opacity=".6"><circle cx="30" cy="38" r=".7"/><circle cx="44" cy="40" r=".6"/><circle cx="22" cy="46" r=".7"/>
+<circle cx="36" cy="48" r=".6"/><circle cx="16" cy="36" r=".5"/></g></g>""",
+}
+
+
+def ensure_icons():
+    ICONS.mkdir(parents=True, exist_ok=True)
+    base = next((p for p in BASE_ICON if p.exists()), None)
+    src = base.read_text() if base else '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect x="4" y="12" width="56" height="42" rx="4" fill="#a8121f"/></svg>'
+    out = {}
+    for lvl, art in MOSS.items():
+        p = ICONS / f"folder-moss-{lvl}.svg"
+        svg = re.sub(r"</svg>\s*$", art + "\n</svg>\n", src.strip())
+        if not p.exists() or p.read_text() != svg:
+            p.write_text(svg)
+        out[lvl] = p.as_uri()
+    return out
+
+
+# ------------------------------------------------------------------ activity
+def recent_opens():
+    """newest 'visited/modified' time per path from GNOME's recent files"""
+    out = {}
+    try:
+        txt = RECENT.read_text(errors="ignore")
+    except Exception:
+        return out
+    for m in re.finditer(r'<bookmark href="file://([^"]+)"[^>]*?(?:modified|visited)="([^"]+)"', txt):
+        path = urllib.parse.unquote(m.group(1))
+        try:
+            t = time.mktime(time.strptime(m.group(2)[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+        except Exception:
+            continue
+        out[path] = max(out.get(path, 0), t)
+    return out
+
+
+def newest_inside(folder: Path):
+    best = folder.stat().st_mtime
+    seen = 0
+    stack = [(folder, 0)]
+    while stack and seen < SCAN_LIMIT:
+        d, depth = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    seen += 1
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    best = max(best, st.st_mtime)
+                    if e.is_dir(follow_symlinks=False) and depth < 2 and not e.name.startswith("."):
+                        stack.append((Path(e.path), depth + 1))
+        except OSError:
+            pass
+    return best
+
+
+def candidates():
+    out = []
+    for p in HOME.iterdir():
+        if p.is_dir() and not p.is_symlink() and not p.name.startswith(".") and p.name not in SKIP_TOP:
+            out.append(p)
+    for sub in WATCH_INSIDE:
+        d = HOME / sub
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.is_dir() and not p.is_symlink() and not p.name.startswith("."):
+                    out.append(p)
+    return out
+
+
+def get_icon(path):
+    r = subprocess.run(["gio", "info", "-a", KEY, str(path)], capture_output=True, text=True)
+    m = re.search(r"metadata::custom-icon:\s*(\S+)", r.stdout)
+    return m.group(1) if m else None
+
+
+def set_icon(path, uri):
+    if uri:
+        subprocess.run(["gio", "set", str(path), KEY, uri], capture_output=True)
+    else:
+        subprocess.run(["gio", "set", "-t", "unset", str(path), KEY], capture_output=True)
+
+
+def scan(notify=False):
+    st = load()
+    icons = ensure_icons()
+    now = time.time()
+    recent = recent_opens()
+    keep = {k: v for k, v in st.get("keep", {}).items() if v > now}
+    ours = st.get("ours", {})
+    folders = []
+    for f in candidates():
+        sp = str(f)
+        last = newest_inside(f)
+        prefix = sp + "/"
+        for path, t in recent.items():
+            if path.startswith(prefix) or path == sp:
+                last = max(last, t)
+        days = (now - last) / DAY
+        level = 0 if sp in keep else next((lv for d, lv in LEVELS if days >= d), 0)
+        cur = get_icon(f)
+        mine = cur is not None and cur.startswith(ICONS.as_uri())
+        if level:
+            if cur is None or mine:
+                if cur != icons[level]:
+                    set_icon(f, icons[level])
+                ours[sp] = level
+            folders.append({"path": sp, "level": level, "days": int(days)})
+        elif mine:
+            set_icon(f, None)
+            ours.pop(sp, None)
+    # folders that vanished
+    for sp in list(ours):
+        if not Path(sp).exists():
+            ours.pop(sp)
+    before = {x["path"] for x in st.get("folders", [])}
+    new = [x for x in folders if x["path"] not in before]
+    st.update(ours=ours, keep=keep, folders=sorted(folders, key=lambda x: -x["days"]), scanned=int(now))
+    save(st)
+    if notify and new:
+        n = len(new)
+        names = ", ".join(Path(x["path"]).name for x in new[:3]) + ("…" if n > 3 else "")
+        try:
+            r = subprocess.run(["notify-send", "-a", "Kuro", "-i", str(ICONS / "folder-moss-2.svg"), "-A", "tidy=Tidy up",
+                                "-t", "600000", f"{n} folder{'s' if n > 1 else ''} gathered moss",
+                                f"{names} — untouched for a month or more."], capture_output=True, text=True, timeout=620)
+            if r.stdout.strip() == "tidy":
+                subprocess.Popen([sys.argv[0], "tidy"], start_new_session=True)
+        except Exception:
+            pass
+    return st
+
+
+def clear():
+    st = load()
+    for sp in list(st.get("ours", {})):
+        if Path(sp).exists():
+            cur = get_icon(sp)
+            if cur and cur.startswith(ICONS.as_uri()):
+                set_icon(sp, None)
+    st.update(ours={}, folders=[])
+    save(st)
+
+
+def human(n):
+    for u in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024:
+            return f"{n:.0f} {u}"
+        n /= 1024
+    return f"{n:.0f} PB"
+
+
+def du(path):
+    total, seen = 0, 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+            seen += 1
+            if seen > 50000:
+                return total
+    return total
+
+
+# ------------------------------------------------------------------ Tidy-up window
+def tidy():
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, GLib, Gtk
+
+    st = scan()
+    words = {1: "a little moss", 2: "mossy", 3: "overgrown"}
+
+    class Win(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="Tidy up", default_width=560, default_height=620)
+            tv = Adw.ToolbarView()
+            tv.add_top_bar(Adw.HeaderBar())
+            self.toast = Adw.ToastOverlay()
+            page = Adw.PreferencesPage()
+            self.group = Adw.PreferencesGroup(title="Folders that gathered moss",
+                                              description="You haven't touched these in a month or more. Nothing is changed unless you pick something.")
+            page.add(self.group)
+            self.toast.set_child(page)
+            tv.set_content(self.toast)
+            self.set_content(tv)
+            if not st["folders"]:
+                self.group.add(Adw.ActionRow(title="No moss anywhere", subtitle="Every folder has been used lately."))
+            for f in st["folders"]:
+                self.add_row(f)
+
+        def add_row(self, f):
+            p = Path(f["path"])
+            row = Adw.ActionRow(title=GLib.markup_escape_text(p.name),
+                                subtitle=f'{words[f["level"]]} · untouched {f["days"]} days · {str(p.parent).replace(str(HOME), "~")}')
+            row.add_prefix(Gtk.Image.new_from_file(str(ICONS / f'folder-moss-{f["level"]}.svg')))
+            size = Gtk.Label(label="…", css_classes=["dim-label"])
+            row.add_suffix(size)
+            GLib.idle_add(lambda: size.set_label(human(du(p))) or False)
+            for label, cb, css in (("Open", self.open, None), ("Keep", self.keep, None),
+                                   ("Archive", self.archive, None), ("Bin", self.trash, "destructive-action")):
+                b = Gtk.Button(label=label, valign=Gtk.Align.CENTER, css_classes=["flat"] + ([css] if css else []))
+                b.connect("clicked", lambda _b, c=cb: c(p, row))
+                row.add_suffix(b)
+            self.group.add(row)
+
+        def done(self, row, msg):
+            self.group.remove(row)
+            self.toast.add_toast(Adw.Toast(title=msg))
+
+        def open(self, p, row):
+            Gio.AppInfo.launch_default_for_uri(p.as_uri(), None)
+
+        def keep(self, p, row):
+            s = load()
+            s.setdefault("keep", {})[str(p)] = time.time() + 182 * DAY
+            save(s)
+            if get_icon(p) and get_icon(p).startswith(ICONS.as_uri()):
+                set_icon(p, None)
+            self.done(row, f"{p.name}: no moss for six months")
+
+        def archive(self, p, row):
+            dest = HOME / "Archive"
+            dest.mkdir(exist_ok=True)
+            target = dest / p.name
+            i = 2
+            while target.exists():
+                target = dest / f"{p.name} ({i})"
+                i += 1
+            set_icon(p, None)
+            shutil.move(str(p), str(target))
+            self.done(row, f"{p.name} → ~/Archive")
+
+        def trash(self, p, row):
+            set_icon(p, None)
+            Gio.File.new_for_path(str(p)).trash(None)
+            self.done(row, f"{p.name} is in the Bin (restore it from Files → Trash)")
+
+    app = Adw.Application(application_id="os.bapirlo.Living", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+    app.connect("activate", lambda a: Win(a).present())
+    app.run([])
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    if cmd == "scan":
+        st = scan(notify="--notify" in sys.argv)
+        print(f'{len(st["folders"])} mossy folder(s)')
+    elif cmd == "tidy":
+        tidy()
+    elif cmd == "status":
+        print(json.dumps(load(), indent=1))
+    elif cmd == "clear":
+        clear()
+        print("moss cleared")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

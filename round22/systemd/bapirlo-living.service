@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro Living OS — moss on folders you haven't touched in a month (icons only)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/bapirlo-os/bin/bapirlo-living scan --notify
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=15min

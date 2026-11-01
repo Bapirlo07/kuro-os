@@ -1,0 +1,12 @@
+{
+  "uuid": "bapirlo-cosmos@bapirlo-os",
+  "name": "Kuro Cosmos",
+  "description": "Kuro OS round 22: black-hole close, echo windows, supernova notifications, wormhole workspace switch, time dilation (Super+Shift+Z), breathing desktop, gravity wells (Super+Alt+P), shatter lock, aurora night-sky wallpaper, constellation launcher (Super+Shift+Space) and Living OS (dock glow and dust, a garden that grows on the wallpaper).",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-cosmos",
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

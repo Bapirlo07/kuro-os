@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-cosmos" path="/org/gnome/shell/extensions/bapirlo-cosmos/">
+    <key name="black-hole" type="b"><default>true</default>
+      <summary>Black hole: a window flung into a screen corner is swallowed (closed)</summary></key>
+    <key name="echo" type="b"><default>true</default>
+      <summary>Echo windows: closed windows leave a fading after-image with a Reopen button</summary></key>
+    <key name="supernova" type="b"><default>true</default>
+      <summary>Supernova: urgent notifications burst across the screen as a shockwave</summary></key>
+    <key name="wormhole" type="b"><default>true</default>
+      <summary>Wormhole: switching workspace flies through a star tunnel</summary></key>
+    <key name="breathe" type="b"><default>true</default>
+      <summary>Breathing desktop: the wallpaper slowly breathes (slower during focus / bedtime)</summary></key>
+    <key name="shatter-lock" type="b"><default>true</default>
+      <summary>Shatter lock: locking cracks the desktop like glass, unlocking reassembles it</summary></key>
+    <key name="aurora" type="b"><default>false</default>
+      <summary>Aurora: night-sky wallpaper that shows CPU load, notifications and downloads</summary></key>
+    <key name="living" type="b"><default>true</default>
+      <summary>Living OS: dock glow / dust by use and a garden that grows on the wallpaper</summary></key>
+    <key name="smooth-guard" type="b"><default>true</default>
+      <summary>Smooth Guard: when the shell stutters or the battery is low, pause the eye-candy until it's calm</summary></key>
+    <key name="dilation-key" type="as"><default><![CDATA[['<Super><Shift>z']]]></default>
+      <summary>Time dilation: hold to slow time</summary></key>
+    <key name="planet-key" type="as"><default><![CDATA[['<Super><Alt>p']]]></default>
+      <summary>Gravity well: make the focused window a planet (again to release)</summary></key>
+    <key name="constellation-key" type="as"><default><![CDATA[['<Super><Shift>space']]]></default>
+      <summary>Constellation launcher</summary></key>
+  </schema>
+</schemalist>

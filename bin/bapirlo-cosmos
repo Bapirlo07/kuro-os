@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Kuro Cosmos (round 22) — switch the cosmic parts on/off and show them off.
+#   bapirlo-cosmos                       what's on
+#   bapirlo-cosmos PART on|off|toggle|status  PART = blackhole echo supernova wormhole breathe shatter aurora living
+#   bapirlo-cosmos demo PART             play it now: blackhole [tl|tr|bl|br] (on a throwaway window) · supernova ·
+#                                        wormhole · shatter · unshatter · star · planet · stars (constellation)
+#   bapirlo-cosmos slow on|off           time dilation without holding keys
+#   bapirlo-cosmos moss | tidy           scan folders for moss now · open the Tidy-up window
+#   bapirlo-cosmos smooth [on|off|test]  Smooth Guard: how smooth the shell is right now + today; test = Lite for 8 s
+set -euo pipefail
+UUID=bapirlo-cosmos@bapirlo-os
+SCHEMA=org.gnome.shell.extensions.bapirlo-cosmos
+DIR=""
+for d in "$HOME/.local/share/gnome-shell/extensions/$UUID/schemas" "$(dirname "$(readlink -f "$0")")/../round22/$UUID/schemas"; do
+  [ -f "$d/gschemas.compiled" ] && { DIR=$d; break; }
+done
+gs() { if [ -n "$DIR" ]; then gsettings --schemadir "$DIR" "$@"; else gsettings "$@"; fi; }
+call() { gdbus call --session -d org.bapirlo.Cosmos -o /org/bapirlo/Cosmos -m "org.bapirlo.Cosmos.$1" "${@:2}" >/dev/null; }
+
+key() {
+  case "$1" in
+    blackhole|black-hole) echo black-hole ;;
+    echo) echo echo ;;
+    supernova) echo supernova ;;
+    wormhole) echo wormhole ;;
+    breathe|breathing) echo breathe ;;
+    shatter|shatter-lock) echo shatter-lock ;;
+    aurora) echo aurora ;;
+    living|garden) echo living ;;
+    *) return 1 ;;
+  esac
+}
+
+case "${1:-}" in
+  "")
+    for p in black-hole echo supernova wormhole breathe shatter-lock aurora living; do
+      printf '%-13s %s\n' "$p" "$( [ "$(gs get $SCHEMA "$p")" = true ] && echo on || echo off)"
+    done
+    echo "keys: Super+Shift+Z time dilation · Super+Alt+P planet · Super+Shift+Space constellation"
+    ;;
+  demo)
+    case "${2:-}" in
+      blackhole)
+        # feeds it a throwaway window of its own — never one of yours
+        TITLE="Black hole snack $$"
+        python3 - "$TITLE" <<'PY' &
+import sys, gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib
+app = Gtk.Application(application_id=None)
+def act(a):
+    w = Gtk.ApplicationWindow(application=a, title=sys.argv[1], default_width=520, default_height=340)
+    w.set_child(Gtk.Label(label="🍪  I'm the snack.\nWatch the top-right corner…"))
+    w.present()
+    GLib.timeout_add_seconds(12, a.quit)
+app.connect("activate", act)
+app.run([])
+PY
+        for _ in $(seq 30); do
+          sleep 0.2
+          r=$(gdbus call --session -d org.bapirlo.Cosmos -o /org/bapirlo/Cosmos -m org.bapirlo.Cosmos.BlackHoleTitle "${3:-tr}" "$TITLE" 2>/dev/null || true)
+          [ "$r" = "(true,)" ] && { sleep 0.9; break; }
+        done
+        ;;
+      supernova) call Supernova ;;
+      wormhole) call Wormhole ;;
+      shatter) call Shatter false ;;
+      unshatter) call Shatter true ;;
+      star) call ShootingStar ;;
+      planet) call Planet ;;
+      stars|constellation) call Constellation ;;
+      *) echo "demo: blackhole [corner] | supernova | wormhole | shatter | unshatter | star | planet | stars" >&2; exit 2 ;;
+    esac
+    ;;
+  slow)
+    case "${2:-}" in on) call Dilate true ;; off) call Dilate false ;; *) echo "slow on|off" >&2; exit 2 ;; esac ;;
+  moss) exec "$(dirname "$(readlink -f "$0")")/bapirlo-living" scan ;;
+  tidy) exec "$(dirname "$(readlink -f "$0")")/bapirlo-living" tidy ;;
+  smooth)
+    case "${2:-status}" in
+      on) gs set $SCHEMA smooth-guard true ;;
+      off) gs set $SCHEMA smooth-guard false ;;
+      test) call SmoothTest "uint32 ${3:-8}"; echo "Lite for ${3:-8} s — watch the wallpaper hold still" ;;
+      status)
+        python3 - "${XDG_STATE_HOME:-$HOME/.local/state}/bapirlo/smooth.json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit("Smooth Guard hasn't reported yet (needs the new Kuro Cosmos — log out and back in)")
+n, t, lim = d.get("now") or {}, d.get("today") or {}, d.get("limits") or {}
+print(f"Smooth Guard  {'on' if d.get('guard') else 'OFF'}   mode: {'LITE — ' + d.get('reason', '') if d.get('lite') else 'full effects'}")
+if n:
+    ok = n.get("frameP90Ms", 0) <= lim.get("frameP90Ms", 9) and n.get("lateMs", 0) <= lim.get("lateMs", 35)
+    print(f"right now     {n.get('fps', 0):.0f} frames/s · slowest frames {n.get('frameP90Ms', 0)} ms (limit {lim.get('frameP90Ms')}) · "
+          f"shell {n.get('lateMs', 0)} ms behind (limit {lim.get('lateMs')})   {'✓ smooth' if ok else '⚠ struggling'}")
+m, s = divmod(int(t.get('liteSeconds', 0)), 60)
+print(f"today         {t.get('episodes', 0)} stutter episode(s) · {m} min {s} s in Lite · worst frame {t.get('worstFrameMs', 0)} ms")
+print(f"updated       {d.get('updated', '?')[:19].replace('T', ' ')}")
+PY
+        ;;
+      *) echo "smooth [on|off|test [seconds]|status]" >&2; exit 2 ;;
+    esac ;;
+  -h|--help|help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)
+    k=$(key "$1") || { echo "unknown part: $1 (bapirlo-cosmos help)" >&2; exit 2; }
+    case "${2:-status}" in
+      on) gs set $SCHEMA "$k" true ;;
+      off) gs set $SCHEMA "$k" false ;;
+      toggle) if [ "$(gs get $SCHEMA "$k")" = true ]; then gs set $SCHEMA "$k" false; echo off; else gs set $SCHEMA "$k" true; echo on; fi ;;
+      status) [ "$(gs get $SCHEMA "$k")" = true ] && echo on || echo off ;;
+      *) echo "$1 on|off|status" >&2; exit 2 ;;
+    esac
+    ;;
+esac

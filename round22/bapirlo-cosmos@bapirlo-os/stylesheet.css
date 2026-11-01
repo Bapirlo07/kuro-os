@@ -1,0 +1,52 @@
+/* Kuro Cosmos */
+.kuro-echo-pill {
+  background-color: rgba(14, 10, 13, 0.82);
+  color: #f2e9ec;
+  border: 1px solid rgba(170, 200, 255, 0.45);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-weight: 600;
+  font-size: 10.5pt;
+  box-shadow: 0 0 18px rgba(120, 160, 255, 0.35);
+}
+.kuro-echo-pill:hover { background-color: rgba(40, 50, 90, 0.92); border-color: rgba(190, 215, 255, 0.9); }
+
+.kuro-dilation-label {
+  color: #cfe0ff;
+  font-weight: 700;
+  font-size: 12pt;
+  letter-spacing: 1px;
+  background-color: rgba(10, 20, 60, 0.55);
+  border-radius: 999px;
+  padding: 6px 16px;
+}
+
+.kuro-star {
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+.kuro-star:hover { background-color: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.7); }
+.kuro-star-new { border-color: rgba(255, 220, 140, 0.8); box-shadow: 0 0 30px rgba(255, 210, 120, 0.6); }
+.kuro-star-label {
+  color: rgba(235, 238, 255, 0.92);
+  font-size: 10.5pt;
+  font-weight: 600;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+.kuro-const-title {
+  color: rgba(235, 238, 255, 0.85);
+  font-size: 22pt;
+  font-weight: 300;
+  letter-spacing: 6px;
+}
+.kuro-const-entry {
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  color: #fff;
+  padding: 9px 18px;
+  font-size: 12pt;
+  caret-color: #fff;
+}
+.kuro-const-entry:focus { border-color: rgba(228, 0, 61, 0.85); }
