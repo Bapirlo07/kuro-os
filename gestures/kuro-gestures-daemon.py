@@ -23,6 +23,15 @@ Round 20 — no lag:
   * shorter holds, a shorter vertical-swipe check and a shorter cooldown
   * KURO_GEST_PROFILE=1 logs fps and timings every 5 s
 Camera released while the screen is locked.
+
+Round 21 — one camera, two jobs (~/.config/bapirlo/camera.json → {"hands": bool, "guard": bool}):
+  * hands  = the air gestures above (default on, so an old setup keeps working)
+  * guard  = Shoulder-surf guard: a second face behind you → Guard(true) → the shell blurs the screen and
+    hides notifications until it's gone. A face that never moves for 30 s (a poster, a photo) is learnt and
+    ignored — never the biggest face, which is you. Faces are looked for 4×/s on alternating whole picture /
+    upper-middle crop (where someone looking over your shoulder stands). Only 5 frames/s are decoded when
+    hands are off. Nothing is ever saved or sent anywhere.
+The daemon owns org.bapirlo.GesturesCam while hands are on and org.bapirlo.KuroGuardCam while guard is on.
 """
 import collections
 import json
@@ -45,6 +54,8 @@ from mediapipe.tasks.python import BaseOptions, vision
 
 MODEL = os.path.expanduser("~/.local/share/bapirlo/models/gesture_recognizer.task")
 CONF = os.path.expanduser("~/.config/bapirlo/gestures.json")
+CAMCONF = os.path.expanduser("~/.config/bapirlo/camera.json")
+FACE_MODEL = os.path.expanduser("~/.local/share/bapirlo/models/blaze_face_short_range.tflite")
 MIRROR_FLAG = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kuro-gestures-mirror")
 SHELL = DBusAddress("/org/bapirlo/Gestures", bus_name="org.bapirlo.Gestures", interface="org.bapirlo.Gestures")
 SAVER = DBusAddress("/org/gnome/ScreenSaver", bus_name="org.gnome.ScreenSaver", interface="org.gnome.ScreenSaver")
@@ -64,6 +75,10 @@ SETTLE = 0.35                            # a hand must be tracked this long befo
 VERT_CONFIRM = 0.15                      # vertical swipes wait this long to see the hand is still there
 LOST_AFTER = 0.5
 IDLE_FPS = 10
+GUARD_FPS = 5                            # decode rate when only the guard is on
+GUARD_EVERY = 0.25                       # s between face checks
+GUARD_CLEAR = 1.5                        # s with no second face before the screen comes back
+STATIC_AFTER = 30.0                      # s a face may sit perfectly still before it's taken for a picture
 running = True
 
 
@@ -103,10 +118,22 @@ class Conf:
 class Shell:
     def __init__(self):
         self.conn = open_dbus_connection(bus="SESSION")
-        try:      # so the shell can tell whether the camera half is running (top-bar icon)
-            self.conn.send_and_get_reply(message_bus.RequestName("org.bapirlo.GesturesCam", 4), timeout=2)
+        self.owned = set()       # org.bapirlo.GesturesCam / KuroGuardCam — see own()
+
+    def own(self, name, want):
+        """Hold or let go of a bus name (so the shell knows which camera jobs are running)."""
+        have = name in self.owned
+        if want == have:
+            return
+        try:
+            if want:
+                self.conn.send_and_get_reply(message_bus.RequestName(name, 4), timeout=2)
+                self.owned.add(name)
+            else:
+                self.conn.send_and_get_reply(message_bus.ReleaseName(name), timeout=2)
+                self.owned.discard(name)
         except Exception as e:
-            log(f"name: {e}")
+            log(f"name {name}: {e}")
 
     def call(self, method, sig=None, *args):
         try:
@@ -140,6 +167,137 @@ class LockWatch(threading.Thread):
             time.sleep(2)
 
 
+class Modes:
+    """~/.config/bapirlo/camera.json, checked once a second. No file = hands on, guard off."""
+    def __init__(self):
+        self.hands, self.guard, self.mtime, self.checked = True, False, -1, 0.0
+        self.refresh(force=True)
+
+    def refresh(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.checked < 1:
+            return
+        self.checked = now
+        try:
+            m = os.stat(CAMCONF).st_mtime
+        except OSError:
+            m = None
+        if m == self.mtime:
+            return
+        self.mtime = m
+        try:
+            with open(CAMCONF) as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        self.hands, self.guard = bool(d.get("hands", True)), bool(d.get("guard", False))
+        log(f"modes: hands={self.hands} guard={self.guard}")
+
+
+class Guard:
+    """Shoulder-surf guard: two or more live faces → on; under two for GUARD_CLEAR s → off."""
+    CROPS = ((0, 0, 1, 1), (0.15, 0.0, 0.85, 0.62))
+
+    def __init__(self, shell):
+        self.shell = shell
+        self.det = None
+        self.last = 0.0
+        self.turn = 0
+        self.hist = collections.deque(maxlen=3)
+        self.on = False
+        self.clear_since = None
+        self.sent_t = 0.0
+        self.tracks = []          # [cx, cy, w, first_seen, last_seen] — anchors for "has this face moved?"
+        self.recent = collections.deque(maxlen=2)   # face lists from the last whole + crop pass
+
+    def _detector(self):
+        if self.det is None:
+            opts = vision.FaceDetectorOptions(base_options=BaseOptions(model_asset_path=FACE_MODEL),
+                                              min_detection_confidence=0.55)
+            self.det = vision.FaceDetector.create_from_options(opts)
+        return self.det
+
+    def _faces(self, frame, lut, box):
+        h, w = frame.shape[:2]
+        x0, y0, x1, y1 = box
+        crop = frame[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+        crop = cv2.resize(crop, (INFER_W, int(INFER_W * crop.shape[0] / max(1, crop.shape[1]))),
+                          interpolation=cv2.INTER_AREA)
+        if lut is not None:
+            crop = cv2.LUT(crop, lut)
+        img = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        ch, cw = crop.shape[:2]
+        out = []
+        for d in self._detector().detect(img).detections:
+            b = d.bounding_box
+            cx = x0 + (b.origin_x + b.width / 2) / cw * (x1 - x0)
+            cy = y0 + (b.origin_y + b.height / 2) / ch * (y1 - y0)
+            out.append((cx, cy, b.width / cw * (x1 - x0)))
+        return out
+
+    def _live(self, faces, now):
+        """Drop faces that have sat perfectly still for STATIC_AFTER s (pictures) — never the biggest one."""
+        if not faces:
+            return []
+        biggest = max(faces, key=lambda f: f[2])
+        live = []
+        for f in faces:
+            tr = next((t for t in self.tracks if abs(f[0] - t[0]) < 0.015 and abs(f[1] - t[1]) < 0.015
+                       and abs(f[2] - t[2]) < 0.015), None)
+            if tr:
+                tr[4] = now
+            else:
+                tr = [f[0], f[1], f[2], now, now]
+                self.tracks.append(tr)
+            if f is biggest or now - tr[3] < STATIC_AFTER:
+                live.append(f)
+        self.tracks = [t for t in self.tracks if now - t[4] < 5]
+        return live
+
+    def _send(self, on, now):
+        self.on, self.sent_t = on, now
+        self.shell.call("Guard", "b", on)
+
+    def reset(self):
+        if self.on:
+            self._send(False, time.monotonic())
+        self.hist.clear()
+        self.recent.clear()
+        self.clear_since = None
+
+    def step(self, frame, lut, now):
+        if now - self.last < GUARD_EVERY:
+            return
+        self.last = now
+        self.turn += 1
+        try:
+            faces = self._faces(frame, lut, self.CROPS[self.turn % 2])
+        except Exception as e:
+            log(f"guard: {e}")
+            return
+        self.recent.append(faces)
+        # merge the two passes: the crop finds small far faces, the whole picture finds big near ones
+        merged = []
+        for f in (x for fs in self.recent for x in fs):
+            if not any(abs(f[0] - g[0]) < 0.05 and abs(f[1] - g[1]) < 0.06 for g in merged):
+                merged.append(f)
+        n = len(self._live(merged, now))
+        self.hist.append(n >= 2)
+        if not self.on:
+            if sum(self.hist) >= 2:
+                self.clear_since = None
+                self._send(True, now)
+        elif n >= 2:
+            self.clear_since = None
+        else:
+            self.clear_since = self.clear_since or now
+            if now - self.clear_since > GUARD_CLEAR:
+                self.hist.clear()
+                self._send(False, now)
+        if self.on and now - self.sent_t > 3:      # say it again now and then, in case the shell restarted
+            self._send(True, now)
+
+
 def v4l2_get(ctrl):
     try:
         out = subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "-C", ctrl], capture_output=True, text=True,
@@ -166,6 +324,7 @@ class Camera(threading.Thread):
         self.t = 0.0
         self.seq = 0
         self.tracking = False
+        self.idle_fps = IDLE_FPS
         self.want_open = False
         self.state = "closed"            # closed | open | failed
         self.grab_n = 0
@@ -226,7 +385,7 @@ class Camera(threading.Thread):
                 continue
             t = time.monotonic()
             self.grab_n += 1
-            if not self.tracking and t - last_decode < 1 / IDLE_FPS - 0.01:
+            if not self.tracking and t - last_decode < 1 / self.idle_fps - 0.01:
                 continue
             ok, frame = cap.retrieve()
             if not ok:
@@ -361,6 +520,9 @@ def main():
     sens = conf.get("sensitivity", "normal")
     views = [View((0, 0, 1, 1), sens), View(ZOOM_BOX, sens)]
     shell = Shell()
+    modes = Modes()
+    guard = Guard(shell)
+    hands_on = None                # last applied hands mode (None = not yet)
     lock = LockWatch()
     lock.start()
     cam = Camera()
@@ -404,6 +566,23 @@ def main():
         cam.tracking = False
 
     while running:
+        modes.refresh()
+        shell.own("org.bapirlo.GesturesCam", modes.hands)
+        shell.own("org.bapirlo.KuroGuardCam", modes.guard)
+        if not modes.guard:
+            guard.reset()
+        if hands_on != modes.hands:
+            if hands_on:                                  # hands just switched off
+                shell.call("Lost")
+                reset_hand()
+                shell.call("Status", "ss", "off", "")
+            hands_on = modes.hands
+        cam.idle_fps = IDLE_FPS if modes.hands else GUARD_FPS
+        if not modes.hands and not modes.guard:           # nothing to do (bapirlo-* stops the service soon)
+            cam.want_open = False
+            time.sleep(0.5)
+            continue
+
         if conf.refresh() and conf.get("sensitivity", "normal") != sens:
             sens = conf.get("sensitivity", "normal")
             views = [View((0, 0, 1, 1), sens), View(ZOOM_BOX, sens)]
@@ -414,13 +593,14 @@ def main():
                 cam.want_open = False
                 shell.call("Lost")
                 reset_hand()
+                guard.reset()
                 set_status("paused", "Screen locked — camera off")
             time.sleep(0.5)
             continue
         if paused or not cam.want_open:
             paused = False
             cam.want_open = True
-        if cam.state == "failed":
+        if cam.state == "failed" and modes.hands:
             set_status("nocam", "Can't open the camera (is another app using it?)")
 
         frame, ft, seq = cam.latest(seq)
@@ -439,6 +619,11 @@ def main():
             if g not in lut_cache:
                 lut_cache[g] = np.array([((i / 255) ** g) * 255 for i in range(256)], np.uint8)
             lut = lut_cache[g]
+
+        if modes.guard:
+            guard.step(frame, lut, now)
+        if not modes.hands:
+            continue
 
         if now - mirror_t > 1:
             mirror_on, mirror_t = os.path.exists(MIRROR_FLAG), now
@@ -598,6 +783,7 @@ def main():
 
     cam.want_open = False
     cam.join(timeout=2)
+    guard.reset()
     shell.call("Lost")
     shell.call("Status", "ss", "off", "")
 

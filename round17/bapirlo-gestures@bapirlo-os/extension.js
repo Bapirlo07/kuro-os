@@ -25,6 +25,9 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as Volume from 'resource:///org/gnome/shell/ui/status/volume.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {GuardCover} from './guard.js';
+import {AirDraw, DRAW_ICON} from './draw.js';
+import {DEFAULT_DRAW} from './draw-shapes.js';
 
 const IFACE = `<node><interface name="org.bapirlo.Gestures">
   <method name="Pointer"><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="b" direction="in"/><arg type="s" direction="in"/></method>
@@ -36,6 +39,8 @@ const IFACE = `<node><interface name="org.bapirlo.Gestures">
   <method name="Mirror"><arg type="ay" direction="in"/></method>
   <method name="Say"><arg type="s" direction="in"/></method>
   <method name="Help"/>
+  <method name="Guard"><arg type="b" direction="in"/></method>
+  <method name="GuardSnooze"><arg type="u" direction="in"/></method>
   <signal name="Done"><arg type="s"/></signal>
 </interface></node>`;
 
@@ -62,6 +67,7 @@ const HOW = [
     ['✌', 'Two fingers, move up / down', 'dial-victory'],
     ['✌', 'Two fingers, flick left / right', 'victory-left|victory-right'],
     ['🤙', 'Shaka (thumb + pinky), hold', 'shaka'],
+    ['🤟', 'Hold 🤟 and draw a shape', 'draw'],
 ];
 const NICE = {
     'ws-next': 'Next workspace  →', 'ws-prev': '←  Previous workspace', 'overview': 'Overview',
@@ -69,10 +75,11 @@ const NICE = {
     'media-next': 'Next track  ⏭', 'media-prev': '⏮  Previous track', 'kuro-cheer': 'Kuro says hi',
     'close-window': 'Close window', 'search': 'Kuro Search', 'screenshot': 'Screenshot',
     'volume': 'Volume', 'volume-up': 'Volume up', 'volume-down': 'Volume down', 'apps': 'Open an app', 'scroll': 'Scroll', 'click': 'Click', 'canvas': 'Zoom canvas', 'help': 'Cheat sheet',
-    'none': 'nothing',
+    'lock': 'Lock screen', 'none': 'nothing',
 };
 const POSE_ICON = {
     'palm': '✋', 'fist': '✊', 'thumb-up': '👍', 'thumb-down': '👎', 'rock': '🤟', 'shaka': '🤙', 'victory': '✌', 'point': '☝',
+    ...Object.fromEntries(Object.entries(DRAW_ICON).map(([k, v]) => [`draw-${k}`, `✍ ${v}`])),
 };
 const STATE_TEXT = {
     looking: 'Looking for your hand…', tracking: 'I see your hand', dark: 'Too dark to see',
@@ -110,6 +117,7 @@ export default class KuroGesturesExtension extends Extension {
         this._minimized = null;
 
         this._buildHud();
+        this._draw = new AirDraw(this);
 
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, '/org/bapirlo/Gestures');
@@ -124,6 +132,10 @@ export default class KuroGesturesExtension extends Extension {
     }
 
     disable() {
+        this._guard?.destroy();
+        this._guard = null;
+        this._draw?.destroy();
+        this._draw = null;
         this._drop();
         this._setMirror(false);
         if (this._camWatch)
@@ -194,6 +206,7 @@ export default class KuroGesturesExtension extends Extension {
         this._px = px;
         this._py = py;
         this._pose = pose;
+        this._draw?.feed(px, py, pose);
         if (pinch !== this._pinch) {
             this._pinch = pinch;
             this._dot.queue_repaint();
@@ -253,6 +266,7 @@ export default class KuroGesturesExtension extends Extension {
     }
 
     Lost() {
+        this._draw?.cancel();
         this._drop(false);
         this._pinchAt = null;
         this._last = null;
@@ -314,6 +328,17 @@ export default class KuroGesturesExtension extends Extension {
     }
 
     // other Kuro helpers (Kuro Knock) borrow the toast
+    // Round 21: shoulder-surf guard (see guard.js)
+    Guard(on) {
+        this._guard ??= new GuardCover();
+        this._guard.set(on);
+    }
+
+    GuardSnooze(seconds) {
+        this._guard ??= new GuardCover();
+        this._guard.snooze(seconds);
+    }
+
     Say(text) {
         this._say(text);
     }
@@ -408,6 +433,9 @@ export default class KuroGesturesExtension extends Extension {
                 break;
             case 'help':
                 this._openHelp();
+                break;
+            case 'lock':
+                Main.screenShield?.lock(true);
                 break;
             case 'kuro-cheer':
                 break;                  // Kuro listens for the Done signal itself
@@ -833,7 +861,7 @@ export default class KuroGesturesExtension extends Extension {
             text: 'Hold a pose still → the ring fills → it happens.   Move while holding ✊ or ✌ → dial.'}));
         const grid = new St.Widget({layout_manager: new Clutter.GridLayout({column_spacing: 14, row_spacing: 6})});
         const gl = grid.layout_manager;
-        HOW.forEach(([icon, how, what], i) => {
+        HOW.filter(h => h[2] !== 'draw').forEach(([icon, how, what], i) => {
             const col = i % 2 ? 3 : 0;
             const row = Math.floor(i / 2);
             const doing = what.includes(' ') ? what
@@ -843,6 +871,17 @@ export default class KuroGesturesExtension extends Extension {
             gl.attach(new St.Label({style_class: 'kuro-help-what', text: doing}), col + 2, row, 1, 1);
         });
         box.add_child(grid);
+        // air-draw shapes get their own line (too many to fit one grid cell)
+        const draw = {...DEFAULT_DRAW, ...(this._conf?.draw ?? {})};
+        const shapes = Object.entries(DRAW_ICON).filter(([k]) => (draw[k] ?? 'none') !== 'none')
+            .map(([k, v]) => `${v} ${NICE[draw[k]] ?? draw[k]}`).join('   ·   ');
+        if (shapes) {
+            const line = new St.BoxLayout({style: 'spacing: 14px; padding-top: 6px;'});
+            line.add_child(new St.Label({style_class: 'kuro-help-icon', text: '🤟'}));
+            line.add_child(new St.Label({style_class: 'kuro-help-how', text: 'Hold 🤟 and draw'}));
+            line.add_child(new St.Label({style_class: 'kuro-help-what', text: shapes}));
+            box.add_child(line);
+        }
         box.add_child(new St.Label({style_class: 'kuro-help-sub',
             text: 'Change what they do: top-bar ✋ → "Change what gestures do…"   ·   click to close'}));
         box.connect('button-press-event', () => {

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Kuro Shoulder-surf guard: bapirlo-guard on | off | toggle | status | snooze [MIN] | test
+#   on  = watch for a second face behind you; the screen blurs and notifications hide while it's there
+#   It uses the webcam (the light stays on while it watches) and shares it with air gestures.
+#   Nothing is recorded or sent anywhere. Off = camera released (unless air gestures are on).
+. "$(dirname "$(readlink -f "$0")")/../lib/kuro-camera.sh"
+note() { cam_note security-high-symbolic "Shoulder-surf guard" "$1"; }
+call() { gdbus call --session -d org.bapirlo.Gestures -o /org/bapirlo/Gestures -m "org.bapirlo.Gestures.$1" "${@:2}" >/dev/null 2>&1; }
+case "${1:-status}" in
+  on)     [[ -f "$HOME/.local/share/bapirlo/models/blaze_face_short_range.tflite" ]] || {
+              echo "The face model is missing — run: bash ~/bapirlo-os/gestures/setup.sh" >&2; exit 1; }
+          cam_set guard true && note "On — the screen hides if someone looks over your shoulder" && echo on ;;
+  off)    cam_set guard false; call Guard false; note "Off"; echo off ;;
+  toggle) if cam_on guard; then "$0" off; else "$0" on; fi ;;
+  status) if cam_on guard; then echo on; else echo off; fi ;;
+  snooze) call GuardSnooze "uint32 $(( ${2:-10} * 60 ))" && echo "snoozed ${2:-10} min" ;;
+  test)   call Guard true; sleep "${2:-3}"; call Guard false ;;     # what it looks like, no camera needed
+  -h|--help|help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "usage: bapirlo-guard on|off|toggle|status|snooze [MIN]|test" >&2; exit 2 ;;
+esac

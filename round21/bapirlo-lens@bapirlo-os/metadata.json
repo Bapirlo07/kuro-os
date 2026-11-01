@@ -1,0 +1,12 @@
+{
+  "uuid": "bapirlo-lens@bapirlo-os",
+  "name": "Kuro Lens",
+  "description": "Kuro OS round 21: X-ray peek (hold Super+Alt+X to see through the window under the pointer), Window shelf (fling a window into the left or right screen edge to park it there as a live thumbnail) and Focus tunnel (during a focus block everything but the focused window fades back; Kuro tells you what came in afterwards).",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-lens",
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

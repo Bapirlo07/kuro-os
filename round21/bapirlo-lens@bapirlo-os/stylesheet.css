@@ -1,0 +1,7 @@
+.kuro-xray-ring { border: 2px solid rgba(232, 48, 72, 0.9); box-shadow: 0 0 22px rgba(232, 48, 72, 0.45); }
+.kuro-xray-tag { font-size: 11px; font-weight: bold; color: #F2E9EC; background-color: rgba(20, 12, 16, 0.85);
+    border-radius: 99px; padding: 3px 10px; }
+.kuro-shelf-card { background-color: rgba(22, 14, 18, 0.92); border: 1px solid rgba(232, 48, 72, 0.55);
+    border-radius: 14px; padding: 6px; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55); }
+.kuro-shelf-card:hover { border-color: rgba(255, 90, 110, 0.95); }
+.kuro-shelf-title { font-size: 11px; color: #E8DCE0; padding-top: 4px; max-width: 200px; }

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-lens" path="/org/gnome/shell/extensions/bapirlo-lens/">
+    <key name="xray-peek" type="as">
+      <default><![CDATA[['<Super><Alt>x']]]></default>
+      <summary>X-ray peek: hold to see through the window under the pointer</summary>
+    </key>
+    <key name="xray-radius" type="i">
+      <range min="60" max="600"/>
+      <default>170</default>
+      <summary>X-ray lens radius (px)</summary>
+    </key>
+    <key name="shelf" type="b">
+      <default>true</default>
+      <summary>Window shelf: windows flung into the left/right edge park there</summary>
+    </key>
+    <key name="tunnel" type="b">
+      <default>true</default>
+      <summary>Focus tunnel: dim everything but the focused window during a focus block</summary>
+    </key>
+    <key name="tunnel-blur" type="b">
+      <default>true</default>
+      <summary>Focus tunnel also blurs (off = dim only, cheaper)</summary>
+    </key>
+  </schema>
+</schemalist>

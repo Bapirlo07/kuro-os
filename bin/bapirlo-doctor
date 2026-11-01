@@ -252,6 +252,76 @@ def check_shell_log(rep):
         rep.ok("Shell log", "no errors from Kuro extensions this login")
 
 
+def check_security(rep):
+    """Round 21: the security pass (2100-round21-security.sh) and the basics. Only real gaps count as problems;
+    things that need a reinstall or firmware change (disk encryption, Secure Boot) are info."""
+    sec = "Security"
+    code, _ = run("systemctl", "is-active", "ufw.service")
+    (rep.ok if code == 0 else rep.problem)(sec, "firewall (ufw) on" if code == 0 else
+                                           "firewall (ufw) is OFF — sudo systemctl enable --now ufw")
+    _, lock = run("gsettings", "get", "org.gnome.desktop.screensaver", "lock-enabled")
+    (rep.ok if lock == "true" else rep.problem)(sec, "screen locks when idle" if lock == "true" else
+                                                "screen lock is off (Settings → Privacy → Screen Lock)")
+    # DNS
+    dropin = os.path.exists("/etc/systemd/resolved.conf.d/50-kuro-privacy.conf")
+    _, st = run("resolvectl", "status")
+    glob = st.split("\n\n")[0] if st else ""
+    dot = re.search(r"\+DNSOverTLS|DNSOverTLS=(yes|opportunistic)", glob)
+    llmnr_on = re.search(r"\+LLMNR", glob)
+    if dropin and dot and not llmnr_on:
+        rep.ok(sec, "DNS encrypted when possible (DoT, Cloudflare + Quad9), LLMNR off")
+    elif dropin:
+        rep.problem(sec, "the private-DNS settings are installed but not active — sudo systemctl restart systemd-resolved")
+    else:
+        rep.info(sec, "DNS goes to the network's server unencrypted; LLMNR on — sudo bash ~/bapirlo-os/2100-round21-security.sh")
+    # USB
+    if shutil.which("usbguard"):
+        code, _ = run("systemctl", "is-active", "usbguard.service")
+        (rep.ok if code == 0 else rep.problem)(sec, "USBGuard on — new USB devices need your OK" if code == 0 else
+                                               "USBGuard is installed but OFF — sudo systemctl enable --now usbguard")
+        if code == 0:
+            ucode, _ = run("systemctl", "--user", "is-active", "kuro-usb-guard.service")
+            if ucode != 0:
+                rep.problem(sec, "the USB \"allow this device?\" popup isn't running — "
+                            "systemctl --user enable --now kuro-usb-guard")
+    else:
+        rep.info(sec, "any USB device works the moment it's plugged in (USBGuard not installed)")
+    # AppArmor
+    try:
+        lsm = open("/sys/kernel/security/lsm").read()
+    except OSError:
+        lsm = ""
+    if "apparmor" in lsm:
+        rep.ok(sec, "AppArmor active")
+    elif os.path.exists("/usr/bin/apparmor_parser"):
+        rep.info(sec, "AppArmor installed — active after the next reboot")
+    else:
+        rep.info(sec, "AppArmor off")
+    # packages with known holes
+    if shutil.which("arch-audit"):
+        code, out = run("arch-audit", "-uq", timeout=20)
+        if code == 0:
+            n = len([l for l in out.splitlines() if l.strip()])
+            (rep.info if n else rep.ok)(sec, f"{n} installed package{'s' if n != 1 else ''} with a security fix "
+                                        "waiting — sudo pacman -Syu" if n else "no package has a security fix waiting")
+    # firmware / disk: info only
+    sb = None
+    try:
+        for f in os.listdir("/sys/firmware/efi/efivars"):
+            if f.startswith("SecureBoot-"):
+                sb = open(os.path.join("/sys/firmware/efi/efivars", f), "rb").read()[-1] == 1
+    except OSError:
+        pass
+    if sb is not None:
+        rep.info(sec, "Secure Boot " + ("on" if sb else "off (needs signed boot files + a firmware change)"))
+    _, types = run("lsblk", "-rno", "TYPE")
+    rep.info(sec, "disk encrypted" if "crypt" in types.split() else
+             "disk not encrypted (a stolen laptop's files are readable — only a reinstall with LUKS fixes it)")
+    code, _ = run("systemctl", "is-active", "sshd.service")
+    if code == 0:
+        rep.info(sec, "SSH server running — others on the network can try to log in")
+
+
 class Report:
     def __init__(self):
         self.items = []
@@ -278,7 +348,7 @@ def main():
     rep = Report()
     rep.ok("GNOME", f"GNOME Shell {major} on disk")
     for check in (lambda r: check_extensions(major, r), check_units, check_snapshots, check_disk,
-                  check_battery, check_ssd, check_spicetify, check_windows, check_shell_log):
+                  check_battery, check_ssd, check_spicetify, check_windows, check_shell_log, check_security):
         try:
             check(rep)
         except Exception as e:  # a broken check must not hide the others

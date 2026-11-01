@@ -1,0 +1,14 @@
+[Unit]
+Description=Kuro USB guard — "allow this USB device?" popups for USBGuard
+After=graphical-session.target
+PartOf=graphical-session.target
+# harmless until 2100-round21-security.sh installs USBGuard
+ConditionPathExists=/usr/bin/usbguard
+
+[Service]
+ExecStart=%h/bapirlo-os/bin/kuro-usb-guard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

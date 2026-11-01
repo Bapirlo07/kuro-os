@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Kuro Air Gestures (webcam): bapirlo-gestures on | off | toggle | status | help
 #   on  = start now and at every login · off = stop and stay off (camera released)
-U=bapirlo-gestures.service
+. "$(dirname "$(readlink -f "$0")")/../lib/kuro-camera.sh"     # shares the camera with bapirlo-guard
 help() { cat <<'H'
 Kuro Air Gestures — hold one hand up in front of the webcam.
 The rule: hold a pose STILL = do it (a ring fills around the red dot).
@@ -15,16 +15,20 @@ The rule: hold a pose STILL = do it (a ring fills around the red dot).
   ✌ two fingers + up/down ... scroll
   ✌ two fingers + flick ←/→ . previous / next song
   🤙 shaka (thumb + pinky) .. open an app (app grid → point + pinch an icon)
+  🤟 hold + draw in the air  ◯ search · ✓ screenshot · Z zoom canvas · △ apps · ^ overview · L lock
+      (change them in gestures.json → "draw": {"circle": "search", ...})
 Change them: ~/.config/bapirlo/gestures.json ("actions"; value = built-in name, "cmd:<command>" or "none").
 On-screen: hand view (bottom right) + ✋ icon in the top bar. `bapirlo-gestures sheet` shows the cheat sheet.
 H
 }
-note() { gdbus call --session -d org.freedesktop.Notifications -o /org/freedesktop/Notifications -m org.freedesktop.Notifications.Notify "Kuro" 0 "input-touchpad-symbolic" "Air gestures" "$1" '[]' '{}' 3000 >/dev/null 2>&1; }
+note() { cam_note input-touchpad-symbolic "Air gestures" "$1"; }
 case "${1:-status}" in
-  on)     systemctl --user enable --now "$U" >/dev/null 2>&1 && note "On — hold a hand up to the camera" && echo on ;;
-  off)    systemctl --user disable --now "$U" >/dev/null 2>&1; note "Off — camera released"; echo off ;;
-  toggle) if systemctl --user is-active -q "$U"; then "$0" off; else "$0" on; fi ;;
-  status) if systemctl --user is-active -q "$U"; then echo "on"; else echo "off"; fi ;;
+  on)     cam_set hands true && note "On — hold a hand up to the camera" && echo on ;;
+  off)    cam_set hands false
+          if cam_on guard; then note "Off (the shoulder-surf guard still uses the camera)"; else note "Off — camera released"; fi
+          echo off ;;
+  toggle) if cam_on hands; then "$0" off; else "$0" on; fi ;;
+  status) if cam_on hands; then echo "on"; else echo "off"; fi ;;
   help|-h|--help) help ;;
   sheet)  gdbus call --session -d org.bapirlo.Gestures -o /org/bapirlo/Gestures -m org.bapirlo.Gestures.Help >/dev/null ;;
   *) echo "usage: bapirlo-gestures on|off|toggle|status|sheet|help" >&2; exit 2 ;;

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Kuro USB guard — the popup half of USBGuard (round 21).
+
+USBGuard (installed by 2100-round21-security.sh) blocks every USB device that wasn't plugged in when it was set up.
+This user service listens to USBGuard on the system D-Bus and, when it blocks something, shows a notification:
+    "Blocked a new USB device: <name>"   [Allow once]  [Always allow]
+Allow once  = until it's unplugged.   Always allow = USBGuard adds a permanent rule for that exact device.
+Ignore it and the device simply stays blocked. A keyboard you didn't plug in yourself is the classic attack —
+if one shows up out of nowhere, don't allow it.
+
+Needs: usbguard-dbus.service + the polkit rule from the security script (lets you answer without a password).
+Test without USBGuard: KURO_USBGUARD_BUS=session (talks to a fake org.usbguard1 on the session bus).
+"""
+import os
+import re
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+NAME, PATH, IFACE = "org.usbguard1", "/org/usbguard1/Devices", "org.usbguard.Devices1"
+ALLOW, BLOCK = 0, 1
+EV_INSERT = 1
+
+bus_kind = Gio.BusType.SESSION if os.environ.get("KURO_USBGUARD_BUS") == "session" else Gio.BusType.SYSTEM
+system = Gio.bus_get_sync(bus_kind, None)
+session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+pending = {}          # notification id → device id
+
+
+def log(*a):
+    print("kuro-usb-guard:", *a, file=sys.stderr, flush=True)
+
+
+def describe(attrs, rule):
+    name = attrs.get("name") or ""
+    vid = attrs.get("id") or ""
+    iface = attrs.get("with-interface") or ""
+    kind = []
+    # interface triples "cc:ss:pp" — the class: 03 = HID (keyboard/mouse), 08 = storage, 0e = camera, ...
+    labels = {"03": "keyboard / mouse", "08": "storage", "0e": "camera", "e0": "wireless", "02": "network",
+              "0a": "network", "01": "audio"}
+    for cls in re.findall(r"\b([0-9a-f]{2}):[0-9a-f*]{2}:[0-9a-f*]{2}", iface.lower()):
+        if cls in labels and labels[cls] not in kind:
+            kind.append(labels[cls])
+    head = name or vid or "Unknown device"
+    return head, (", ".join(kind) or "USB device") + (f"  ·  {vid}" if vid and name else "")
+
+
+def notify(dev_id, attrs, rule):
+    title, sub = describe(attrs, rule)
+    hid_warn = "\nNot yours? Don't allow it — fake keyboards are a common attack." if "keyboard" in sub else ""
+    args = GLib.Variant("(susssasa{sv}i)", (
+        "Kuro", 0, "security-high-symbolic", f"Blocked a new USB device: {title}", f"{sub}{hid_warn}",
+        ["allow-once", "Allow once", "allow-always", "Always allow"],
+        {"urgency": GLib.Variant("y", 2), "resident": GLib.Variant("b", True),
+         "desktop-entry": GLib.Variant("s", "org.gnome.Settings")}, 0))
+    try:
+        res = session.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                "org.freedesktop.Notifications", "Notify", args, GLib.VariantType("(u)"),
+                                Gio.DBusCallFlags.NONE, 3000, None)
+        pending[res.unpack()[0]] = dev_id
+    except GLib.Error as e:
+        log(f"notify: {e.message}")
+
+
+def apply(dev_id, permanent):
+    try:
+        system.call_sync(NAME, PATH, IFACE, "applyDevicePolicy", GLib.Variant("(uub)", (dev_id, ALLOW, permanent)),
+                         None, Gio.DBusCallFlags.NONE, 5000, None)
+        log(f"allowed device {dev_id} ({'always' if permanent else 'once'})")
+    except GLib.Error as e:
+        log(f"allow {dev_id}: {e.message}")
+        session.call("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                     "org.freedesktop.Notifications", "Notify",
+                     GLib.Variant("(susssasa{sv}i)", ("Kuro", 0, "dialog-error-symbolic", "Couldn't allow the device",
+                                                      e.message, [], {}, 6000)),
+                     None, Gio.DBusCallFlags.NONE, 3000, None, None, None)
+
+
+def on_presence(_c, _s, _p, _i, _sig, params, _u):
+    dev_id, event, target, rule, attrs = params.unpack()
+    if event == EV_INSERT and target == BLOCK:
+        notify(dev_id, dict(attrs), rule)
+
+
+def on_action(_c, _s, _p, _i, _sig, params, _u):
+    nid, action = params.unpack()
+    dev = pending.pop(nid, None)
+    if dev is not None and action in ("allow-once", "allow-always"):
+        apply(dev, action == "allow-always")
+
+
+def on_closed(_c, _s, _p, _i, _sig, params, _u):
+    pending.pop(params.unpack()[0], None)
+
+
+system.signal_subscribe(None, IFACE, "DevicePresenceChanged", PATH, None, Gio.DBusSignalFlags.NONE, on_presence, None)
+session.signal_subscribe(None, "org.freedesktop.Notifications", "ActionInvoked", "/org/freedesktop/Notifications",
+                         None, Gio.DBusSignalFlags.NONE, on_action, None)
+session.signal_subscribe(None, "org.freedesktop.Notifications", "NotificationClosed", "/org/freedesktop/Notifications",
+                         None, Gio.DBusSignalFlags.NONE, on_closed, None)
+log(f"listening on the {'session' if bus_kind == Gio.BusType.SESSION else 'system'} bus")
+GLib.MainLoop().run()
