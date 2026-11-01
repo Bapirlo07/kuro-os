@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro World — redraw every 15 minutes (sky, sun, town lights)
+
+[Timer]
+OnStartupSec=40s
+OnCalendar=*:0/15
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

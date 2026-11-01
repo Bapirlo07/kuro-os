@@ -1,0 +1,14 @@
+.kuro-canvas { background-color: #07050a; }
+.kuro-island {
+  border-radius: 48px;
+  border: 6px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.75);
+}
+.kuro-island:hover { border-color: rgba(228, 0, 61, 0.55); }
+.kuro-island.active { border-color: rgba(228, 0, 61, 0.85); }
+.kuro-island-label {
+  color: #F9EDEE;
+  font-size: 13pt;
+  font-weight: 700;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+}

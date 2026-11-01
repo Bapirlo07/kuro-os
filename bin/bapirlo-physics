@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Kuro Window Physics
+  bapirlo-physics                       what's on
+  bapirlo-physics throw|shake|shatter on|off
+  bapirlo-physics all on|off
+  bapirlo-physics gravity               drop every window into a pile now
+  bapirlo-physics float                 float them back home
+"""
+import json, os, subprocess, sys
+from pathlib import Path
+CONF = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "bapirlo" / "physics.json"
+PARTS = ("throw", "shake", "shatter")
+try:
+    c = {p: True for p in PARTS} | json.loads(CONF.read_text())
+except Exception:
+    c = {p: True for p in PARTS}
+a = sys.argv[1:]
+if a and a[0] in ("gravity", "float"):
+    sys.exit(subprocess.call(["gdbus", "call", "--session", "-d", "org.bapirlo.Physics", "-o", "/org/bapirlo/Physics",
+                              "-m", "org.bapirlo.Physics." + a[0].capitalize()], stdout=subprocess.DEVNULL))
+if len(a) == 2 and a[0] in PARTS + ("all",) and a[1] in ("on", "off"):
+    for p in (PARTS if a[0] == "all" else (a[0],)):
+        c[p] = a[1] == "on"
+    CONF.parent.mkdir(parents=True, exist_ok=True)
+    CONF.write_text(json.dumps(c, indent=1))
+elif a:
+    print(__doc__.strip(), file=sys.stderr)
+    sys.exit(2)
+print("  ".join(f"{p}: {'on' if c[p] else 'off'}" for p in PARTS))

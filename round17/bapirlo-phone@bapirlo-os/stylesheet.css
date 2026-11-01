@@ -1,0 +1,21 @@
+.kuro-phone-card {
+  background-color: rgba(18, 12, 14, 0.94);
+  border: 1px solid rgba(228, 0, 61, 0.6);
+  border-radius: 16px;
+  padding: 10px 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: #F9EDEE;
+}
+.kuro-phone-card:hover { border-color: #E4003D; }
+.kuro-phone-card-box { spacing: 12px; }
+.kuro-phone-card-title { font-weight: 700; font-size: 11pt; }
+.kuro-phone-card-sub { font-size: 9pt; color: rgba(249, 237, 238, 0.7); }
+.kuro-phone-toast {
+  background-color: rgba(18, 12, 14, 0.92);
+  color: #F9EDEE;
+  border: 1px solid rgba(228, 0, 61, 0.6);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 11.5pt;
+  font-weight: 700;
+}

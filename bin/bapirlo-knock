@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Kuro Knock (microphone): bapirlo-knock on | off | toggle | status | test | edit | help
+U=bapirlo-knock.service
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/bapirlo/knock.json
+help() { cat <<'H'
+Kuro Knock — knock on the desk or the laptop:
+  knock knock ............ play / pause
+  knock knock knock ...... lock the screen
+  knock · knock knock .... next wallpaper        (· = a short pause)
+  knock knock · knock knock  Do Not Disturb on/off
+Ignored while you type or move the mouse. GNOME shows the microphone-in-use icon while it's on.
+  bapirlo-knock test   see what it hears (tune "sensitivity" in ~/.config/bapirlo/knock.json)
+  bapirlo-knock edit   your own patterns: "x-xx": ["command", "args"]
+H
+}
+note() { gdbus call --session -d org.freedesktop.Notifications -o /org/freedesktop/Notifications -m org.freedesktop.Notifications.Notify "Kuro" 0 "audio-input-microphone-symbolic" "Knock control" "$1" '[]' '{}' 3000 >/dev/null 2>&1; }
+case "${1:-status}" in
+  on)     systemctl --user enable --now "$U" >/dev/null 2>&1 && note "On — knock knock to play/pause" && echo on ;;
+  off)    systemctl --user disable --now "$U" >/dev/null 2>&1; note "Off — microphone released"; echo off ;;
+  toggle) if systemctl --user is-active -q "$U"; then "$0" off; else "$0" on; fi ;;
+  status) if systemctl --user is-active -q "$U"; then echo on; else echo off; fi ;;
+  test)   was=$(systemctl --user is-active "$U"); systemctl --user stop "$U" 2>/dev/null
+          echo "Knock on the desk (Ctrl+C to stop)…"; python3 -I "$HOME/bapirlo-os/knock/kuro-knock.py" --test
+          [ "$was" = active ] && systemctl --user start "$U" ;;
+  edit)   mkdir -p "$(dirname "$CONF")"
+          [ -f "$CONF" ] || printf '{\n "sensitivity": 1.0,\n "patterns": {\n  "xx": "media",\n  "xxx": "lock",\n  "x-xx": ["bapirlo-wallpaper", "next"],\n  "xx-xx": ["bapirlo-mode", "dnd", "toggle"]\n }\n}\n' > "$CONF"
+          xdg-open "$CONF" ;;
+  help|-h|--help) help ;;
+  *) echo "usage: bapirlo-knock on|off|toggle|status|test|edit|help" >&2; exit 2 ;;
+esac

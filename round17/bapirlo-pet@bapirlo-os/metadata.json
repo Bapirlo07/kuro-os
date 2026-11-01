@@ -1,0 +1,8 @@
+{
+  "uuid": "bapirlo-pet@bapirlo-os",
+  "name": "Kuro Creature",
+  "description": "Kuro OS: Kuro, a little ink spirit that lives on your windows — walks along their tops, naps when you're away, cheers for finished downloads and new songs, hides for fullscreen, and slowly grows up.",
+  "shell-version": ["50", "51"],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

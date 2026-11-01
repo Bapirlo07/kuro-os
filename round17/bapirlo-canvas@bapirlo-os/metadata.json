@@ -1,0 +1,9 @@
+{
+  "uuid": "bapirlo-canvas@bapirlo-os",
+  "name": "Kuro Infinite Desktop",
+  "description": "Kuro OS: hold Super and scroll down (or Super+Z) to zoom out of your screen — every workspace is an island with its live windows on a map of Kuro World. Fly around, click to dive in.",
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-canvas",
+  "shell-version": ["50", "51"],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

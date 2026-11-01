@@ -1,0 +1,8 @@
+{
+  "uuid": "bapirlo-phone@bapirlo-os",
+  "name": "Kuro Throw to Phone",
+  "description": "Kuro OS: throw a window hard against the top of the screen and a picture of it lands on your phone (Ctrl = your clipboard instead); files from the phone drop in from the top. Uses GSConnect / KDE Connect.",
+  "shell-version": ["50", "51"],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

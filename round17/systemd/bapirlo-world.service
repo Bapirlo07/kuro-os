@@ -1,0 +1,7 @@
+[Unit]
+Description=Kuro World — redraw the growing wallpaper (only while it's the wallpaper)
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/bapirlo-os/bin/bapirlo-world tick

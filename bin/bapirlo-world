@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Kuro World — the wallpaper that grows with you.
+  bapirlo-world              how your world is doing (tree, town, season…)
+  bapirlo-world set          draw it now and make it your wallpaper
+  bapirlo-world render       draw it now (the timer runs `tick` every 15 minutes)
+  bapirlo-world tick         redraw only if Kuro World is your wallpaper right now
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+import bapirlo_wallpaper as W  # noqa: E402
+import kuro_world as K  # noqa: E402
+
+FILE = os.path.join(W.LIBRARY, "kuro-world.png")
+
+
+def render():
+    os.makedirs(W.LIBRARY, exist_ok=True)
+    K.cleanup_tmp(W.LIBRARY)
+    return K.render(FILE)
+
+
+def describe(st):
+    tree = ["a sprout", "a sapling", "a young tree", "a tall tree", "an old giant"][min(4, int(st["growth"] * 5))]
+    print(f"Kuro World · {st['season']} · {st['slot']}")
+    print(f"  tree:  {tree} — {st['blocks']} focus blocks finished ({st['focus_minutes']} min)")
+    print(f"  town:  {st['houses']} houses — {st['days']} days with Kuro")
+    print(f"  lights tonight: {int(st['lit'] * 100)} % — {st['screen_hours']} h screen time today (less = brighter)")
+    print(f"  flowers: {min(160, st['pets'] * 2)} — Kuro petted {st['pets']}×")
+
+
+def main(argv):
+    verb = argv[0] if argv else "status"
+    if verb in ("-h", "--help", "help"):
+        print(__doc__.strip())
+    elif verb == "render":
+        describe(render())
+    elif verb == "set":
+        st = render()
+        W.unhide(FILE)                     # it lives in the library, so the gallery already lists it
+        W.choose(FILE)
+        describe(st)
+    elif verb == "tick":
+        if os.path.realpath(W.state().get("path") or "") == os.path.realpath(FILE):
+            render()
+    elif verb == "status":
+        last = K._json(K.WORLD_STATE, {})
+        describe(last | K.stats() if "season" in last else render())
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

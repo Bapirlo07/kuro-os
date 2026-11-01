@@ -1,0 +1,8 @@
+{
+  "uuid": "bapirlo-physics@bapirlo-os",
+  "name": "Kuro Window Physics",
+  "description": "Kuro OS: throw windows and watch them bounce, shake a window to drop all the others into a pile (shake again to float them back), and closing a window shatters it like glass. bapirlo-physics turns each part on or off.",
+  "shell-version": ["50", "51"],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

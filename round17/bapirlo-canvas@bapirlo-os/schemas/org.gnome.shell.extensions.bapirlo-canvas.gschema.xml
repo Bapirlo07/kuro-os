@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-canvas" path="/org/gnome/shell/extensions/bapirlo-canvas/">
+    <key name="canvas-toggle" type="as">
+      <default><![CDATA[['<Super>z']]]></default>
+      <summary>Zoom out to the infinite desktop (also: Super + scroll down)</summary>
+    </key>
+  </schema>
+</schemalist>
