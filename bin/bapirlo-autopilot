@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""Kuro OS — Autopilot: notices things you do again and again and OFFERS to do them for you.
+It never acts on its own — only rules you said yes to run.
+
+  bapirlo-autopilot analyze            look at the last 30 days, write new suggestions (Kuro Flow asks you)
+  bapirlo-autopilot list               suggestions waiting · rules you accepted
+  bapirlo-autopilot accept ID | reject ID
+  bapirlo-autopilot forget RULE_ID     drop an accepted rule
+  bapirlo-autopilot file PATH          (Kuro Flow) a download finished — apply your "move" rules to it
+  bapirlo-autopilot launch-set ID      (launcher) open a set of apps you made into one button
+  bapirlo-autopilot reset              forget everything it learnt (events, suggestions, rules)
+
+What it learns from (Kuro Flow writes it, it never leaves this computer):
+  ~/.local/state/bapirlo/autopilot/events.jsonl  app launches (time, app) and files you moved out of Downloads
+Kinds of suggestion:
+  · set   — "you open Firefox, Code and Spotify together most mornings" → one launcher that opens all three
+  · time  — "you open Spotify around 09:00 on weekdays" → Kuro opens it then (if it isn't open already)
+  · move  — "you always move .pdf downloads to Documents/Uni" → new ones go there by themselves
+"""
+import collections
+import datetime as dt
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "bapirlo/autopilot"
+EVENTS = DIR / "events.jsonl"
+STATE = DIR / "state.json"          # {suggestions: {id: {...}}, decided: {id: "yes"|"no"}, rules: {id: {...}}}
+APPS = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications"
+KEEP_DAYS = 30
+
+
+def load_state():
+    try:
+        s = json.loads(STATE.read_text())
+    except Exception:
+        s = {}
+    for k in ("suggestions", "decided", "rules"):
+        s.setdefault(k, {})
+    return s
+
+
+def save_state(s):
+    DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, indent=1))
+    tmp.replace(STATE)
+
+
+def events(days=KEEP_DAYS):
+    cutoff = time.time() - days * 86400
+    out = []
+    try:
+        with open(EVENTS) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("t", 0) >= cutoff:
+                    out.append(e)
+    except OSError:
+        pass
+    return out
+
+
+def prune():
+    keep = events()
+    if EVENTS.exists():
+        tmp = EVENTS.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(e) + "\n" for e in keep))
+        tmp.replace(EVENTS)
+
+
+def sid(*parts):
+    return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()[:10]
+
+
+def app_name(app_id):
+    for d in [APPS, Path("/usr/share/applications"), Path("/var/lib/flatpak/exports/share/applications"),
+              HOME / ".local/share/flatpak/exports/share/applications"]:
+        f = d / app_id
+        if f.exists():
+            for line in f.read_text(errors="ignore").splitlines():
+                if line.startswith("Name="):
+                    return line[5:]
+    return app_id.removesuffix(".desktop")
+
+
+def nice_list(names):
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def analyze():
+    ev = events()
+    prune()
+    st = load_state()
+    new = []
+    launches = [e for e in ev if e.get("k") == "launch" and e.get("app")]
+
+    # --- set: apps opened in the first 15 minutes of a day's first launch, together on most days
+    by_day = collections.defaultdict(list)
+    for e in launches:
+        by_day[dt.date.fromtimestamp(e["t"]).isoformat()].append(e)
+    morning = []
+    for day, es in by_day.items():
+        es.sort(key=lambda e: e["t"])
+        first = es[0]["t"]
+        morning.append({e["app"] for e in es if e["t"] - first <= 900})
+    if len(morning) >= 4:
+        freq = collections.Counter(a for s in morning for a in s)
+        core = sorted(a for a, c in freq.items() if c >= 3 and c / len(morning) >= 0.6)
+        if len(core) >= 2:
+            names = [app_name(a) for a in core]
+            new.append({"id": sid("set", *core), "kind": "set", "apps": core,
+                        "text": f"You open {nice_list(names)} together most days. Make one button that opens them all?"})
+
+    # --- time: same app within ±20 min on 4+ different weekdays of the last 14 days
+    recent = [e for e in launches if e["t"] >= time.time() - 14 * 86400]
+    per_app = collections.defaultdict(list)
+    for e in recent:
+        d = dt.datetime.fromtimestamp(e["t"])
+        if d.weekday() < 5:
+            per_app[e["app"]].append((d.date(), d.hour * 60 + d.minute))
+    in_sets = {a for x in new if x["kind"] == "set" for a in x["apps"]} | \
+              {a for r in list(st["rules"].values()) + list(st["suggestions"].values()) if r["kind"] == "set" for a in r["apps"]}
+    for app, hits in per_app.items():
+        if app in in_sets:          # already covered by a "set" — one question is enough
+            continue
+        mins = sorted(m for _d, m in hits)
+        best = None
+        for m in mins:
+            days = {d for d, mm in hits if abs(mm - m) <= 20}
+            if len(days) >= 4 and (best is None or len(days) > best[1]):
+                best = (m, len(days))
+        if best:
+            at = f"{best[0] // 60:02d}:{(best[0] % 60) // 5 * 5:02d}"
+            new.append({"id": sid("time", app, at), "kind": "time", "app": app, "at": at, "days": "weekdays",
+                        "text": f"You open {app_name(app)} around {at} on weekdays. Should Kuro open it for you then?"})
+
+    # --- move: files of one type moved out of Downloads into the same folder 3+ times
+    moves = collections.Counter((e.get("ext", "").lower(), e.get("dest")) for e in ev if e.get("k") == "move" and e.get("dest"))
+    for (ext, dest), n in moves.items():
+        if n >= 3 and ext:
+            where = dest.replace(str(HOME), "~")
+            new.append({"id": sid("move", ext, dest), "kind": "move", "ext": ext, "dest": dest,
+                        "text": f"You've moved {n} {ext} downloads to {where}. Move new ones there automatically?"})
+
+    added = 0
+    for s in new:
+        if s["id"] in st["decided"] or s["id"] in st["suggestions"] or s["id"] in st["rules"]:
+            continue
+        s["at_found"] = int(time.time())
+        st["suggestions"][s["id"]] = s
+        added += 1
+    save_state(st)
+    print(f"{added} new suggestion(s), {len(st['suggestions'])} waiting, {len(st['rules'])} rule(s)")
+
+
+def accept(i):
+    st = load_state()
+    s = st["suggestions"].pop(i, None)
+    if not s:
+        sys.exit(f"no suggestion {i}")
+    st["decided"][i] = "yes"
+    st["rules"][i] = s
+    if s["kind"] == "set":
+        APPS.mkdir(parents=True, exist_ok=True)
+        names = [app_name(a) for a in s["apps"]]
+        (APPS / f"kuro-autopilot-{i}.desktop").write_text(
+            "[Desktop Entry]\nType=Application\n"
+            f"Name=Open {nice_list(names)}\nComment=Kuro Autopilot: one button for apps you open together\n"
+            f"Exec={Path(__file__).resolve()} launch-set {i}\nIcon=view-app-grid-symbolic\nCategories=Utility;\n")
+        subprocess.run(["update-desktop-database", str(APPS)], capture_output=True)
+    save_state(st)
+    print(f"rule {i} on: {s['text']}")
+
+
+def reject(i):
+    st = load_state()
+    st["suggestions"].pop(i, None)
+    st["decided"][i] = "no"
+    save_state(st)
+    print("ok, won't ask again")
+
+
+def forget(i):
+    st = load_state()
+    st["rules"].pop(i, None)
+    (APPS / f"kuro-autopilot-{i}.desktop").unlink(missing_ok=True)
+    save_state(st)
+    print("rule dropped")
+
+
+def launch_set(i):
+    r = load_state()["rules"].get(i)
+    if not r:
+        sys.exit("no such set")
+    for a in r["apps"]:
+        subprocess.Popen(["gtk-launch", a.removesuffix(".desktop")], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def file_done(path):
+    p = Path(path)
+    if not p.is_file():
+        return
+    ext = p.suffix.lower()
+    for r in load_state()["rules"].values():
+        if r["kind"] == "move" and r["ext"] == ext and Path(r["dest"]).is_dir():
+            dest = Path(r["dest"]) / p.name
+            i = 2
+            while dest.exists():
+                dest = Path(r["dest"]) / f"{p.stem} ({i}){p.suffix}"
+                i += 1
+            shutil.move(str(p), str(dest))
+            subprocess.run(["notify-send", "-a", "Kuro Autopilot", "-i", "folder-download-symbolic",
+                            f"Moved {p.name}", f"→ {str(dest.parent).replace(str(HOME), '~')} (your rule for {ext} files)"],
+                           check=False)
+            return
+
+
+def show():
+    st = load_state()
+    print("Waiting for your answer:" if st["suggestions"] else "No suggestions waiting.")
+    for i, s in st["suggestions"].items():
+        print(f"  {i}  {s['text']}")
+    print("Rules you said yes to:" if st["rules"] else "No rules yet.")
+    for i, s in st["rules"].items():
+        print(f"  {i}  [{s['kind']}] {s['text']}")
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "list"
+    if cmd == "analyze":
+        analyze()
+    elif cmd == "list":
+        show()
+    elif cmd == "accept" and len(a) == 2:
+        accept(a[1])
+    elif cmd == "reject" and len(a) == 2:
+        reject(a[1])
+    elif cmd == "forget" and len(a) == 2:
+        forget(a[1])
+    elif cmd == "file" and len(a) == 2:
+        file_done(a[1])
+    elif cmd == "launch-set" and len(a) == 2:
+        launch_set(a[1])
+    elif cmd == "reset":
+        shutil.rmtree(DIR, ignore_errors=True)
+        for f in APPS.glob("kuro-autopilot-*.desktop"):
+            f.unlink()
+        print("Autopilot forgot everything")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

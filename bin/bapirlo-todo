@@ -2,6 +2,7 @@
 """Kuro OS — the desk To-do card from the terminal (same file, the card updates by itself).
   bapirlo-todo                 list (numbers for done / rm)
   bapirlo-todo add buy milk    add one
+  bapirlo-todo add --due 2026-11-06 send report   with a due day (the card shows it; red when overdue)
   bapirlo-todo done 2          tick / untick number 2
   bapirlo-todo rm 2            remove number 2
   bapirlo-todo clear           remove every ticked one"""
@@ -39,7 +40,14 @@ def main(argv):
     items = load()
     cmd = argv[0] if argv else "list"
     if cmd == "add" and len(argv) > 1:
-        items.append({"id": str(int(time.time() * 1e6)), "text": " ".join(argv[1:]), "done": False, "at": int(time.time())})
+        rest, due = argv[1:], None
+        if rest[0] == "--due" and len(rest) > 2:
+            due, rest = rest[1], rest[2:]
+            time.strptime(due, "%Y-%m-%d")          # raises on a bad date
+        item = {"id": str(int(time.time() * 1e6)), "text": " ".join(rest), "done": False, "at": int(time.time())}
+        if due:
+            item["due"] = due
+        items.append(item)
         save(items)
     elif cmd in ("done", "rm") and len(argv) == 2 and argv[1].isdigit():
         view = ordered(items)
@@ -59,7 +67,8 @@ def main(argv):
         print(__doc__)
         sys.exit(2)
     for n, it in enumerate(ordered(load()), 1):
-        print(f"{n:2}. [{'x' if it.get('done') else ' '}] {it['text']}")
+        due = f"  (due {it['due']})" if it.get("due") else ""
+        print(f"{n:2}. [{'x' if it.get('done') else ' '}] {it['text']}{due}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro deep search — refresh the index every 30 minutes
+
+[Timer]
+OnBootSec=8min
+OnUnitActiveSec=30min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

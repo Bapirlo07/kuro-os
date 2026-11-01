@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Kuro Flow (round 23) — switches and shortcuts from the terminal.
+#   bapirlo-flow                              what's on
+#   bapirlo-flow PART on|off|toggle|status    PART = expander meeting deep-search autopilot
+#   bapirlo-flow hints|palette|arrange|watch|task    do it now (same as the keys)
+#   bapirlo-flow meeting-now on|off           start / end meeting mode by hand
+# Keys: Super+; hints · Super+Shift+P palette · Super+A arrange · Super+Shift+W watch · Super+Shift+D text → task
+set -euo pipefail
+UUID=bapirlo-flow@bapirlo-os
+SCHEMA=org.gnome.shell.extensions.bapirlo-flow
+DIR=""
+for d in "$HOME/.local/share/gnome-shell/extensions/$UUID/schemas" "$(dirname "$(readlink -f "$0")")/../round23/$UUID/schemas"; do
+  [ -f "$d/gschemas.compiled" ] && { DIR=$d; break; }
+done
+gs() { if [ -n "$DIR" ]; then gsettings --schemadir "$DIR" "$@"; else gsettings "$@"; fi; }
+call() { gdbus call --session -d org.bapirlo.Flow -o /org/bapirlo/Flow -m "org.bapirlo.Flow.$1" "${@:2}" >/dev/null; }
+case "${1:-}" in
+  "") for p in expander meeting deep-search autopilot; do
+        printf '%-12s %s\n' "$p" "$( [ "$(gs get $SCHEMA "$p")" = true ] && echo on || echo off)"; done ;;
+  hints) call Hints ;; palette) call Palette ;; arrange) call Arrange ;; watch) call Watch ;; task) call ToTask ;;
+  meeting-now) case "${2:-}" in on) call Meeting true ;; off) call Meeting false ;; *) echo "meeting-now on|off" >&2; exit 2 ;; esac ;;
+  expander|meeting|deep-search|autopilot)
+    case "${2:-status}" in
+      on) gs set $SCHEMA "$1" true ;;
+      off) gs set $SCHEMA "$1" false ;;
+      toggle) if [ "$(gs get $SCHEMA "$1")" = true ]; then gs set $SCHEMA "$1" false; echo off; else gs set $SCHEMA "$1" true; echo on; fi ;;
+      status) [ "$(gs get $SCHEMA "$1")" = true ] && echo on || echo off ;;
+      *) echo "$1 on|off|toggle|status" >&2; exit 2 ;;
+    esac ;;
+  -h|--help|help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "unknown: $1 (bapirlo-flow help)" >&2; exit 2 ;;
+esac

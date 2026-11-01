@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Kuro OS — power tools for Files (right-click → Scripts → Kuro …). Also usable from a terminal:
+
+  kuro-files rename FILES…            rename many at once: find/replace, numbering, case, with a live preview
+  kuro-files convert png|jpg|webp FILES…   convert pictures (originals kept)
+  kuro-files resize 50%|1920|1280 FILES…   smaller copies, named "photo (1920).jpg"
+  kuro-files zip FILES…               one .zip next to them
+  kuro-files merge-pdf FILES…         one PDF, in the order they're named
+  kuro-files clean FILES…             copies of photos without camera / GPS metadata ("photo (clean).jpg")
+  kuro-files install | uninstall      put the menu entries into Files' Scripts menu (or take them out)
+
+Nothing is ever overwritten: a clash gets " (2)". One notification says what happened.
+"""
+import os
+import re
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+SCRIPTS = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "nautilus/scripts"
+ENTRIES = {
+    "Kuro · Rename…": "rename",
+    "Kuro · Convert to PNG": "convert png",
+    "Kuro · Convert to JPG": "convert jpg",
+    "Kuro · Convert to WebP": "convert webp",
+    "Kuro · Resize to 1920 px": "resize 1920",
+    "Kuro · Resize to half": "resize 50%",
+    "Kuro · Compress to ZIP": "zip",
+    "Kuro · Merge PDFs": "merge-pdf",
+    "Kuro · Copy without photo metadata": "clean",
+}
+IMG = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".avif"}
+
+
+def notify(title, body=""):
+    subprocess.run(["notify-send", "-a", "Files", "-i", "system-file-manager", title, body], check=False)
+
+
+def free(p: Path) -> Path:
+    if not p.exists():
+        return p
+    i = 2
+    while True:
+        q = p.with_name(f"{p.stem} ({i}){p.suffix}")
+        if not q.exists():
+            return q
+        i += 1
+
+
+def files_from(args):
+    paths = [Path(a) for a in args if a]
+    if not paths and os.environ.get("NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"):
+        paths = [Path(x) for x in os.environ["NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"].splitlines() if x]
+    return [p.resolve() for p in paths if p.exists()]
+
+
+def magick(*args):
+    r = subprocess.run(["magick", *map(str, args)], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def convert(fmt, paths):
+    fmt = fmt.lower().lstrip(".")
+    ext = {"jpeg": "jpg"}.get(fmt, fmt)
+    done = 0
+    for p in paths:
+        if p.suffix.lower() not in IMG:
+            continue
+        out = free(p.with_suffix(f".{ext}"))
+        args = [p, *(["-background", "white", "-flatten", "-quality", "90"] if ext == "jpg" else ["-quality", "90"]), out]
+        done += magick(*args)
+    notify(f"Converted {done} picture{'s' if done != 1 else ''} to {ext.upper()}", "The originals are still there.")
+
+
+def resize(spec, paths):
+    done = 0
+    for p in paths:
+        if p.suffix.lower() not in IMG:
+            continue
+        tag = spec.rstrip("%") + ("%" if spec.endswith("%") else "")
+        out = free(p.with_name(f"{p.stem} ({tag.replace('%', ' percent')}){p.suffix}"))
+        geo = spec if spec.endswith("%") else f"{spec}x{spec}>"
+        done += magick(p, "-resize", geo, out)
+    notify(f"Made {done} smaller cop{'ies' if done != 1 else 'y'}", f"Resized to {spec}")
+
+
+def make_zip(paths):
+    if not paths:
+        return
+    base = paths[0].parent
+    name = paths[0].stem if len(paths) == 1 else (base.name or "Archive")
+    out = free(base / f"{name}.zip")
+    n = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in paths:
+            if p.is_dir():
+                for root, _dirs, fs in os.walk(p):
+                    for f in fs:
+                        full = Path(root) / f
+                        z.write(full, full.relative_to(p.parent))
+                        n += 1
+            else:
+                z.write(p, p.name)
+                n += 1
+    notify(f"Compressed {n} file{'s' if n != 1 else ''}", out.name)
+
+
+def merge_pdf(paths):
+    pdfs = sorted((p for p in paths if p.suffix.lower() == ".pdf"), key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)])
+    if len(pdfs) < 2:
+        notify("Pick two or more PDFs to merge")
+        return
+    out = free(pdfs[0].parent / "Merged.pdf")
+    r = subprocess.run(["pdfunite", *map(str, pdfs), str(out)], capture_output=True, text=True)
+    notify(f"Merged {len(pdfs)} PDFs" if r.returncode == 0 else "Couldn't merge those PDFs", out.name if r.returncode == 0 else r.stderr[:200])
+
+
+def clean(paths):
+    done = 0
+    for p in paths:
+        if p.suffix.lower() not in IMG:
+            continue
+        out = free(p.with_name(f"{p.stem} (clean){p.suffix}"))
+        # -auto-orient first so a rotated phone photo stays upright once the orientation tag is gone
+        done += magick(p, "-auto-orient", "-strip", out)
+    notify(f"{done} clean cop{'ies' if done != 1 else 'y'} made", "No camera, GPS or date data in them.")
+
+
+# ---------------------------------------------------------------- batch rename window
+def rename(paths):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, Gtk
+
+    paths = sorted(paths, key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)])
+
+    def new_names(find, repl, use_re, prefix, suffix, number, start, case):
+        out = []
+        width = len(str(start + len(paths) - 1))
+        for i, p in enumerate(paths):
+            stem, ext = (p.stem, p.suffix) if p.is_file() else (p.name, "")
+            if find:
+                try:
+                    stem = re.sub(find, repl, stem) if use_re else stem.replace(find, repl)
+                except re.error:
+                    pass
+            if number:
+                stem = f"{stem} {str(start + i).zfill(width)}" if number == "after" else f"{str(start + i).zfill(width)} {stem}"
+            stem = f"{prefix}{stem}{suffix}"
+            stem = {"lower": stem.lower(), "upper": stem.upper(), "title": stem.title()}.get(case, stem)
+            out.append(stem.strip() + ext)
+        return out
+
+    class Win(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title=f"Rename {len(paths)} items", default_width=640, default_height=640)
+            tv = Adw.ToolbarView()
+            hb = Adw.HeaderBar()
+            self.apply = Gtk.Button(label="Rename", css_classes=["suggested-action"])
+            self.apply.connect("clicked", self.on_apply)
+            hb.pack_end(self.apply)
+            tv.add_top_bar(hb)
+            self.toast = Adw.ToastOverlay()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12,
+                          margin_start=12, margin_end=12)
+            g = Adw.PreferencesGroup()
+            self.find = Adw.EntryRow(title="Find")
+            self.repl = Adw.EntryRow(title="Replace with")
+            self.regex = Adw.SwitchRow(title="Find is a regular expression")
+            self.prefix = Adw.EntryRow(title="Add before")
+            self.suffix = Adw.EntryRow(title="Add after")
+            self.number = Adw.ComboRow(title="Numbers", model=Gtk.StringList.new(["None", "Before the name", "After the name"]))
+            self.start = Adw.SpinRow.new_with_range(0, 9999, 1)
+            self.start.set_title("Start at")
+            self.start.set_value(1)
+            self.case = Adw.ComboRow(title="Letters", model=Gtk.StringList.new(["Keep", "lower case", "UPPER CASE", "Title Case"]))
+            for w in (self.find, self.repl, self.regex, self.prefix, self.suffix, self.number, self.start, self.case):
+                g.add(w)
+                for sig in ("changed", "notify::active", "notify::selected", "notify::value"):
+                    try:
+                        w.connect(sig, lambda *_: self.preview())
+                    except TypeError:
+                        pass
+            box.append(g)
+            self.list = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
+            sc = Gtk.ScrolledWindow(vexpand=True, child=self.list)
+            box.append(sc)
+            self.toast.set_child(box)
+            tv.set_content(self.toast)
+            self.set_content(tv)
+            self.preview()
+
+        def names(self):
+            num = {0: None, 1: "before", 2: "after"}[self.number.get_selected()]
+            case = {0: None, 1: "lower", 2: "upper", 3: "title"}[self.case.get_selected()]
+            return new_names(self.find.get_text(), self.repl.get_text(), self.regex.get_active(), self.prefix.get_text(),
+                             self.suffix.get_text(), num, int(self.start.get_value()), case)
+
+        def preview(self):
+            while (row := self.list.get_row_at_index(0)) is not None:
+                self.list.remove(row)
+            names = self.names()
+            dup = {n for n in names if names.count(n) > 1}
+            for p, n in zip(paths, names):
+                r = Adw.ActionRow(title=n, subtitle=p.name if n != p.name else "unchanged")
+                if n in dup or "/" in n or not n.strip():
+                    r.add_css_class("error")
+                self.list.append(r)
+            self.apply.set_sensitive(not dup and all("/" not in n and n.strip() for n in names) and names != [p.name for p in paths])
+
+        def on_apply(self, *_):
+            names = self.names()
+            # two steps (via temporary names) so swapping names between files works
+            moves = [(p, p.with_name(n)) for p, n in zip(paths, names) if p.name != n]
+            taken = [d for _s, d in moves if d.exists() and d not in [s for s, _ in moves]]
+            if taken:
+                self.toast.add_toast(Adw.Toast(title=f"“{taken[0].name}” already exists here"))
+                return
+            tmp = []
+            for i, (s, d) in enumerate(moves):
+                t = s.with_name(f".kuro-rename-{os.getpid()}-{i}")
+                s.rename(t)
+                tmp.append((t, d))
+            for t, d in tmp:
+                t.rename(d)
+            notify(f"Renamed {len(moves)} item{'s' if len(moves) != 1 else ''}")
+            self.close()
+
+    app = Adw.Application(application_id="os.bapirlo.FilesRename", flags=Gio.ApplicationFlags.NON_UNIQUE)
+    app.connect("activate", lambda a: Win(a).present())
+    app.run([])
+
+
+def install():
+    me = Path(__file__).resolve()
+    SCRIPTS.mkdir(parents=True, exist_ok=True)
+    for name, cmd in ENTRIES.items():
+        f = SCRIPTS / name
+        f.write_text(f'#!/bin/sh\n# Kuro Files power tool (round 23) — kuro-files uninstall removes these\nexec "{me}" {cmd} "$@"\n')
+        f.chmod(0o755)
+    print(f"{len(ENTRIES)} entries in Files → right-click → Scripts")
+
+
+def uninstall():
+    for name in ENTRIES:
+        (SCRIPTS / name).unlink(missing_ok=True)
+    print("removed")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__)
+        sys.exit(2)
+    cmd = a[0]
+    if cmd == "install":
+        return install()
+    if cmd == "uninstall":
+        return uninstall()
+    if cmd in ("convert", "resize") and len(a) > 1:
+        paths = files_from(a[2:])
+        return (convert if cmd == "convert" else resize)(a[1], paths)
+    paths = files_from(a[1:])
+    if not paths:
+        notify("Select some files first")
+        return
+    {"rename": rename, "zip": make_zip, "merge-pdf": merge_pdf, "clean": clean}.get(cmd, lambda _p: (print(__doc__), sys.exit(2)))(paths)
+
+
+if __name__ == "__main__":
+    main()

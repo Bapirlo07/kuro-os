@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Inside your files
+Comment=Kuro deep search — words inside documents, PDFs and screenshots
+Icon=system-search-symbolic
+Exec=bapirlo-deepsearch status

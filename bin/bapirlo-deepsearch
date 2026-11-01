@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Kuro OS — Deep search: find files by what's INSIDE them (text, PDFs, Office files, and words in screenshots).
+
+  bapirlo-deepsearch index [--quiet]       update the index (a user timer runs it every 30 min, at idle priority)
+  bapirlo-deepsearch query WORDS [--json]  best matches with a snippet (Kuro Search uses --json)
+  bapirlo-deepsearch status                how many files are indexed, how big the index is
+  bapirlo-deepsearch forget                delete the index
+
+Looks in ~/Documents ~/Desktop ~/Downloads ~/Projects ~/Pictures/Screenshots (3 levels down, no hidden or
+build folders). Text and code files (< 1 MB), PDFs (pdftotext), .docx/.odt/.pptx/.xlsx (their XML), and
+pictures in Screenshots / Desktop / Downloads read with tesseract (at most 40 new ones per run).
+Only changed files are read again. Everything stays in ~/.local/share/bapirlo/deepsearch.db (SQLite FTS5).
+"""
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import zipfile
+from pathlib import Path
+
+HOME = Path.home()
+DB = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "bapirlo/deepsearch.db"
+
+
+def xdg(name, fallback):
+    try:
+        out = subprocess.run(["xdg-user-dir", name], capture_output=True, text=True, timeout=3).stdout.strip()
+        if out and out != str(HOME):
+            return Path(out)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return HOME / fallback
+
+
+ROOTS = [xdg("DOCUMENTS", "Documents"), xdg("DESKTOP", "Desktop"), xdg("DOWNLOAD", "Downloads"), HOME / "Projects",
+         xdg("PICTURES", "Pictures") / "Screenshots"]
+OCR_ROOTS = {str(xdg("PICTURES", "Pictures") / "Screenshots"), str(xdg("DESKTOP", "Desktop")), str(xdg("DOWNLOAD", "Downloads"))}
+DEPTH = 3
+TEXT = {".txt", ".md", ".markdown", ".rst", ".org", ".csv", ".tsv", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+        ".conf", ".log", ".tex", ".html", ".htm", ".xml", ".py", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".css", ".scss",
+        ".c", ".h", ".cpp", ".hpp", ".rs", ".go", ".java", ".kt", ".swift", ".rb", ".php", ".sh", ".bash", ".zsh",
+        ".fish", ".lua", ".sql", ".r", ".m", ".cs", ".vue", ".svelte", ".srt", ".vtt"}
+OFFICE = {".docx": "word/document.xml", ".odt": "content.xml", ".ods": "content.xml", ".odp": "content.xml",
+          ".pptx": "ppt/slides/", ".xlsx": "xl/sharedStrings.xml"}
+IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", "target", "build", "dist", ".cache", ".next",
+             "site-packages", "vendor"}
+MAX_TEXT = 1 << 20
+MAX_KEEP = 200_000           # characters stored per file
+OCR_PER_RUN = 40
+
+
+def connect():
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(DB)
+    con.execute("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, mtime REAL, size INTEGER, kind TEXT)")
+    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(path UNINDEXED, name, body, tokenize='unicode61 remove_diacritics 2')")
+    return con
+
+
+def walk():
+    for root in ROOTS:
+        if not root.is_dir():
+            continue
+        stack = [(root, 0)]
+        while stack:
+            d, depth = stack.pop()
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                continue
+            for e in entries:
+                if e.name.startswith("."):
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    if depth < DEPTH and e.name not in SKIP_DIRS:
+                        stack.append((Path(e.path), depth + 1))
+                elif e.is_file(follow_symlinks=False):
+                    yield Path(e.path), str(root)
+
+
+def kind_of(p: Path, root: str):
+    ext = p.suffix.lower()
+    if ext in TEXT:
+        return "text"
+    if ext == ".pdf":
+        return "pdf"
+    if ext in OFFICE:
+        return "office"
+    if ext in IMAGES and (root in OCR_ROOTS or str(p.parent) in OCR_ROOTS):
+        return "image"
+    return None
+
+
+def strip_xml(s: str) -> str:
+    s = re.sub(r"<(w:p|text:p|a:p|si)[ >]", "\n<", s)
+    return re.sub(r"<[^>]+>", " ", s)
+
+
+def read(p: Path, kind: str):
+    try:
+        if kind == "text":
+            with open(p, "rb") as f:
+                b = f.read(MAX_TEXT)
+            if b"\0" in b[:4096]:
+                return None
+            return b.decode("utf-8", "replace")
+        if kind == "pdf":
+            r = subprocess.run(["pdftotext", "-q", "-l", "60", str(p), "-"], capture_output=True, timeout=60)
+            return r.stdout.decode("utf-8", "replace")
+        if kind == "office":
+            part = OFFICE[p.suffix.lower()]
+            with zipfile.ZipFile(p) as z:
+                names = [n for n in z.namelist() if n.startswith(part)] if part.endswith("/") else [part]
+                return "\n".join(strip_xml(z.read(n).decode("utf-8", "replace")) for n in sorted(names) if n in z.namelist())
+        if kind == "image":
+            r = subprocess.run(["tesseract", str(p), "-", "-l", "eng", "--psm", "3"], capture_output=True, timeout=90,
+                               env={**os.environ, "OMP_THREAD_LIMIT": "1"})
+            return r.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired, zipfile.BadZipFile, KeyError):
+        return None
+    return None
+
+
+def index(quiet=False):
+    con = connect()
+    known = {row[0]: (row[1], row[2]) for row in con.execute("SELECT path, mtime, size FROM files")}
+    seen, added, ocr = set(), 0, 0
+    t0 = time.time()
+    for p, root in walk():
+        kind = kind_of(p, root)
+        if not kind:
+            continue
+        sp = str(p)
+        seen.add(sp)
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if kind == "text" and st.st_size > MAX_TEXT:
+            continue
+        if known.get(sp) == (st.st_mtime, st.st_size):
+            continue
+        if kind == "image":
+            if ocr >= OCR_PER_RUN or st.st_size > 12 << 20:
+                continue
+            ocr += 1
+        body = read(p, kind)
+        if body is None:
+            continue
+        body = re.sub(r"[ \t\r\f\v]+", " ", body)[:MAX_KEEP]
+        con.execute("DELETE FROM docs WHERE path = ?", (sp,))
+        con.execute("INSERT INTO docs(path, name, body) VALUES (?, ?, ?)", (sp, p.stem.replace("_", " ").replace("-", " "), body))
+        con.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?)", (sp, st.st_mtime, st.st_size, kind))
+        added += 1
+        if added % 50 == 0:
+            con.commit()
+    gone = [p for p in known if p not in seen]
+    for sp in gone:
+        con.execute("DELETE FROM docs WHERE path = ?", (sp,))
+        con.execute("DELETE FROM files WHERE path = ?", (sp,))
+    con.commit()
+    if added or gone:
+        con.execute("INSERT INTO docs(docs) VALUES('optimize')")
+        con.commit()
+    con.close()
+    if not quiet:
+        print(f"indexed {added} file(s) ({ocr} by OCR), dropped {len(gone)}, {time.time() - t0:.1f} s")
+
+
+def fts_query(words):
+    terms = [re.sub(r'["*^():]', "", w) for w in words]
+    terms = [t for t in terms if t]
+    if not terms:
+        return None
+    return " AND ".join(f'"{t}"*' for t in terms)
+
+
+def query(words, as_json=False, limit=8):
+    q = fts_query(words)
+    out = []
+    if q and DB.exists():
+        con = sqlite3.connect(DB)
+        try:
+            rows = con.execute(
+                "SELECT path, snippet(docs, 2, '[', ']', '…', 12), bm25(docs, 0.0, 6.0, 1.0) AS r FROM docs "
+                "WHERE docs MATCH ? ORDER BY r LIMIT ?", (q, limit * 2)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        con.close()
+        for path, snip, _r in rows:
+            if os.path.exists(path):
+                out.append({"path": path, "name": os.path.basename(path),
+                            "snippet": re.sub(r"\s+", " ", snip).strip()[:160],
+                            "where": os.path.dirname(path).replace(str(HOME), "~")})
+            if len(out) >= limit:
+                break
+    if as_json:
+        print(json.dumps(out))
+    else:
+        for r in out:
+            print(f"{r['name']}  ({r['where']})\n    {r['snippet']}")
+        if not out:
+            print("nothing found")
+
+
+def status():
+    if not DB.exists():
+        print("no index yet — bapirlo-deepsearch index")
+        return
+    con = sqlite3.connect(DB)
+    rows = dict(con.execute("SELECT kind, COUNT(*) FROM files GROUP BY kind").fetchall())
+    con.close()
+    total = sum(rows.values())
+    print(f"{total} files indexed ({', '.join(f'{v} {k}' for k, v in sorted(rows.items()))}) · "
+          f"{DB.stat().st_size / 1e6:.1f} MB · {DB}")
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "status"
+    if cmd == "index":
+        index(quiet="--quiet" in a)
+    elif cmd == "query" and len(a) > 1:
+        words = [w for w in a[1:] if w != "--json"]
+        query(words, as_json="--json" in a)
+    elif cmd == "status":
+        status()
+    elif cmd == "forget":
+        DB.unlink(missing_ok=True)
+        print("index deleted")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

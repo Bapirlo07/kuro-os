@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-flow" path="/org/gnome/shell/extensions/bapirlo-flow/">
+    <key name="expander" type="b"><default>true</default>
+      <summary>Text expander: ;key then space types your snippet (Kuro Settings → Snippets)</summary></key>
+    <key name="meeting" type="b"><default>true</default>
+      <summary>Meeting mode: during calls hold banners, pause music, show a call timer</summary></key>
+    <key name="deep-search" type="b"><default>true</default>
+      <summary>Deep search: show files whose contents match in search</summary></key>
+    <key name="autopilot" type="b"><default>true</default>
+      <summary>Autopilot: notice repeated habits and suggest automating them (only asks)</summary></key>
+    <key name="hints-key" type="as"><default><![CDATA[['<Super>semicolon']]]></default>
+      <summary>Window hints</summary></key>
+    <key name="palette-key" type="as"><default><![CDATA[['<Super><Shift>p']]]></default>
+      <summary>Command palette</summary></key>
+    <key name="arrange-key" type="as"><default><![CDATA[['<Super>a']]]></default>
+      <summary>Arrange windows (again within 5 s = undo)</summary></key>
+    <key name="watch-key" type="as"><default><![CDATA[['<Super><Shift>w']]]></default>
+      <summary>Watch an area of the screen</summary></key>
+    <key name="task-key" type="as"><default><![CDATA[['<Super><Shift>d']]]></default>
+      <summary>Selected text → to-do</summary></key>
+  </schema>
+</schemalist>

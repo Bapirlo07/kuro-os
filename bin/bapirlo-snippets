@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Kuro text-expander snippets (~/.config/bapirlo/snippets.json; the shell picks changes up at once).
+  bapirlo-snippets                 list them
+  bapirlo-snippets add ;sig "Best wishes, Kuro"
+  bapirlo-snippets rm ;sig
+  bapirlo-snippets edit            Kuro Settings → Snippets
+Type the key then a space in any app (not terminals or password boxes). Built in: ;date ;time ;now ;iso ;week ;shrug"""
+import json
+import os
+import subprocess
+import sys
+
+F = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "bapirlo", "snippets.json")
+
+
+def load():
+    try:
+        return json.load(open(F, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save(d):
+    os.makedirs(os.path.dirname(F), exist_ok=True)
+    with open(F + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(F + ".tmp", F)
+
+
+a = sys.argv[1:]
+d = load()
+if not a:
+    for k, v in d.items():
+        print(f"{k:12} {v}")
+    print("(none yet — bapirlo-snippets add ;key \"text\")" if not d else "")
+elif a[0] == "add" and len(a) >= 3 and " " not in a[1]:
+    d[a[1]] = " ".join(a[2:]).replace("\\n", "\n")
+    save(d)
+    print(f"{a[1]} → {d[a[1]]}")
+elif a[0] == "rm" and len(a) == 2:
+    print("removed" if d.pop(a[1], None) is not None else "no such snippet")
+    save(d)
+elif a[0] == "edit":
+    subprocess.Popen([os.path.expanduser("~/bapirlo-os/settings-app/bapirlo-settings"), "--page=snippets"], start_new_session=True)
+else:
+    print(__doc__)
+    sys.exit(2)

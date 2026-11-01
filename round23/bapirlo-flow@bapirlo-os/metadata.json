@@ -1,0 +1,12 @@
+{
+  "uuid": "bapirlo-flow@bapirlo-os",
+  "name": "Kuro Flow",
+  "description": "Kuro OS round 23: window hints (Super+;), command palette (Super+Shift+P), text expander (;key + space), one-key arrange (Super+A), screen watch (Super+Shift+W), meeting mode, selected text → to-do (Super+Shift+D), deep search inside your files, and Autopilot (suggests automating habits, never acts on its own).",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-flow",
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

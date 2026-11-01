@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro deep search — index the words inside your documents, PDFs and screenshots (local only)
+
+[Service]
+Type=oneshot
+ExecStart=%h/bapirlo-os/bin/bapirlo-deepsearch index --quiet
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=60%
+TimeoutStartSec=30min
