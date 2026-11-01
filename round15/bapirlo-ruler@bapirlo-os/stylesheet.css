@@ -1,0 +1,22 @@
+/* Kuro Ruler — Kuro palette (tools/palette.py) + shell polish tokens (chip 8) */
+.br-overlay { background-color: rgba(10, 7, 9, 0.12); }
+.br-line { background-color: rgba(255, 70, 85, 0.85); }
+.br-box {
+  background-color: rgba(225, 29, 46, 0.14);
+  border: 1px solid #FF4655;
+}
+.br-label {
+  font-family: "JetBrains Mono", monospace; font-size: 10.5pt; font-weight: 700; color: #F2E9EC;
+  background-color: rgba(14, 10, 13, 0.94);
+  border: 1px solid rgba(225, 29, 46, 0.45);
+  border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(122, 15, 26, 0.95);
+  padding: 4px 9px;
+}
+.br-hint {
+  font-family: Bangers, Inter, sans-serif; font-size: 13pt; letter-spacing: 1px; color: #F2E9EC;
+  background-color: rgba(14, 10, 13, 0.90);
+  border: 1px solid rgba(225, 29, 46, 0.35);
+  border-radius: 999px;
+  padding: 5px 16px;
+}

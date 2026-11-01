@@ -1,0 +1,12 @@
+{
+  "uuid": "bapirlo-ruler@bapirlo-os",
+  "name": "Kuro Ruler",
+  "description": "Kuro OS: Super+Shift+M measures anything on screen — crosshair with the pointer position, drag a box to get its size in pixels (copied to the clipboard).",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-ruler",
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

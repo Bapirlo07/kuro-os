@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-ruler" path="/org/gnome/shell/extensions/bapirlo-ruler/">
+    <key name="ruler-toggle" type="as">
+      <default><![CDATA[['<Shift><Super>m']]]></default>
+      <summary>Screen ruler: measure on screen</summary>
+    </key>
+  </schema>
+</schemalist>

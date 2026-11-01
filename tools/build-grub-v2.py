@@ -160,7 +160,7 @@ def save_icon(img, names):
     img = img.resize((IS, IS), Image.LANCZOS)
     for n in names: img.save(f"{OUT}/icons/{n}.png")
 
-save_icon(logo(IS * 4), ["bapirlo", "arch", "gnu-linux", "linux", "cachyos"])
+save_icon(logo(IS * 4), ["kuro", "bapirlo", "arch", "gnu-linux", "linux", "cachyos"])
 # Windows: generic 2x2 rounded tiles (steel), not the trademarked logo shape
 img = canvas(); d = ImageDraw.Draw(img); st = rgb("steel", 255)
 for cx, cy in ((36, 36), (136, 36), (36, 136), (136, 136)):

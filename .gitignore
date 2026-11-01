@@ -62,3 +62,8 @@ tools/uxplay-src/
 
 # bar-look previews are shot over the fan-art wallpaper: local only
 /bar-looks/previews/
+
+# --- local backups made by round scripts / tests
+/round*/backup/
+/round17/test/r18-backup/
+*.bak

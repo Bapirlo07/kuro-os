@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""Kuro OS — Settings: every Kuro switch in one place, and an Undo list (GTK4 + libadwaita).
+
+  bapirlo-settings            open it
+  bapirlo-settings --page=undo   open on a page (extensions, modes, power, screentime, undo)
+  bapirlo-settings --undo     list the backups and their restore commands (terminal, no window)
+
+Pages
+  Extensions  every *@bapirlo-os extension: on/off, plus its settings made from its own schema
+              (switches, sliders, choices, text; shortcuts shown read-only — Super+/ lists them all).
+              Changes apply live; internal state keys and lists that have their own editor are left out.
+  Modes       Gaming / Quiet / Do Not Disturb (bapirlo-mode), Bedtime (bapirlo-bedtime), tools (doctor, update, Studio,
+              Wallpapers, Welcome), recent colours from the picker (Super+Shift+C), ruler (Super+Shift+M).
+  Battery     level, watts in/out, last 24 h, health, 80 % limit, power mode   (kuro_pages.py)
+  Screen time today, last 7 days, top apps (counted by the desk extension, local files)
+  Undo        each ~/theme-backups/LATEST-* with the command that puts it back: the backup's own
+              restore.sh, or the script that made it with "restore". It runs in a terminal (sudo asks
+              there), only after you confirm. Backups with no known command get "Open folder".
+
+Nothing runs while the window is closed.
+"""
+import datetime
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import threading
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BIN = os.path.join(ROOT, "bin")
+HOME = os.path.expanduser("~")
+BACKUPS = os.path.join(HOME, "theme-backups")
+EXT_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local/share")),
+                       "gnome-shell/extensions")
+COLOURS = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")),
+                       "bapirlo/colours.txt")
+APP_ID = "os.bapirlo.Settings"
+
+# state the extensions write for themselves, and lists that have their own editor
+HIDE = {
+    "bapirlo-bar": {"focus-phase", "focus-end", "focus-left", "focus-total", "focus-started",
+                    "focus-owns-dnd", "focus-request"},
+    "bapirlo-desk": {"briefing-last"},
+}
+ACCEL = re.compile(r"^(<[A-Za-z0-9_]+>)+[^<>\s]+$")
+MODS = {"Super": "Super", "Shift": "Shift", "Control": "Ctrl", "Ctrl": "Ctrl", "Primary": "Ctrl", "Alt": "Alt"}
+
+
+# ============================================================================ undo list (no GTK)
+def _backup_dir(link):
+    try:
+        if os.path.islink(link) or os.path.isdir(link):
+            return os.path.realpath(link)
+        with open(link) as f:          # some LATEST-* are a file holding the path
+            p = f.read().strip()
+        return p if os.path.isdir(p) else None
+    except OSError:
+        return None
+
+
+def _when(d):
+    m = re.match(r"(\d{8})-(\d{6})", os.path.basename(d))
+    try:
+        if m:
+            return datetime.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        return datetime.datetime.fromtimestamp(os.path.getmtime(d))
+    except (OSError, ValueError):
+        return datetime.datetime.fromtimestamp(0)
+
+
+def _needs_root(text):
+    return '-eq 0 ] ||' in text and '-ne 0 ] ||' not in text
+
+
+_SCRIPTS = None
+
+
+def _scripts():
+    global _SCRIPTS
+    if _SCRIPTS is None:
+        _SCRIPTS = []
+        for dp, dns, fns in os.walk(ROOT):
+            dns[:] = [d for d in dns if d not in ("src", "build", ".git", "node_modules", "vendor", "__pycache__")]
+            for fn in fns:
+                if fn.endswith(".sh"):
+                    p = os.path.join(dp, fn)
+                    try:
+                        with open(p, errors="replace") as f:
+                            _SCRIPTS.append((p, f.read()))
+                    except OSError:
+                        pass
+        _SCRIPTS.sort()
+    return _SCRIPTS
+
+
+def restore_command(name, d):
+    """(argv, needs_root) that undoes backup NAME, or (None, False)."""
+    own = os.path.join(d, "restore.sh")
+    if os.path.isfile(own):
+        with open(own, errors="replace") as f:
+            return ["bash", own], _needs_root(f.read())
+    word = re.compile(re.escape(name) + r"(?![A-Z0-9-])")
+    for path, text in _scripts():          # a dedicated undo script (restore-boot-v2.sh) wins
+        if os.path.basename(path).startswith("restore") and word.search(text):
+            return ["bash", path], _needs_root(text)
+    for path, text in _scripts():
+        # the script that WRITES this LATEST link (LATEST=…, ln -s …, echo … > …), not one that only reads it
+        if not any(word.search(line) and re.search(r"LATEST=|ln -s|> *\"", line) for line in text.splitlines()):
+            continue
+        # only if the script really has that mode — running an install script without it would re-apply it
+        if name.endswith("-ROOT") and _handles(text, "restore-root"):
+            return ["bash", path, "restore-root"], True
+        if _handles(text, "restore"):
+            return ["bash", path, "restore"], _needs_root(text)
+    return None, False
+
+
+def _handles(text, mode):
+    m = re.escape(mode)
+    return bool(re.search(rf'(\$\{{?1[^=\n]*=+ *"?{m}"?(?![\w-]))|((^|[\s|"(]){m}"?\))', text, re.M))
+
+
+def backups():
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(BACKUPS) if n.startswith("LATEST"))
+    except OSError:
+        return out
+    for n in names:
+        d = _backup_dir(os.path.join(BACKUPS, n))
+        if not d:
+            continue
+        cmd, root = restore_command(n, d)
+        title = n[len("LATEST-"):] if n != "LATEST" else "System (first backup)"
+        title = title.replace("-", " ").title().replace("Gnome", "GNOME").replace("Grub", "GRUB").replace("Ai ", "AI ").replace("Cc ", "CC ").replace("Ws ", "Workspace ")
+        title = re.sub(r"Round(\d)", r"Round \1", title)
+        out.append({"name": n, "title": title, "dir": d, "when": _when(d), "cmd": cmd, "root": root})
+    out.sort(key=lambda b: b["when"], reverse=True)
+    return out
+
+
+def command_text(b):
+    return ("sudo " if b["root"] else "") + " ".join(shlex.quote(a) for a in b["cmd"]).replace(HOME, "~")
+
+
+if __name__ == "__main__" and "--undo" in sys.argv:
+    for b in backups():
+        print(f"{b['when']:%Y-%m-%d %H:%M}  {b['title']:<26} {command_text(b) if b['cmd'] else '(no restore command — see ' + b['dir'] + ')'}")
+    sys.exit(0)
+
+# ============================================================================ GTK
+import gi  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+import kuro_pages  # noqa: E402
+
+CSS = """
+window.bapirlo-settings { background-color: #0E0A0D; color: #F2E9EC; }
+.brand { font-family: Bangers; font-size: 26pt; letter-spacing: 2px; color: #FF4655;
+         text-shadow: 3px 3px 0 #7A0F1A; }
+.tagline { color: #8E7680; }
+preferencesgroup > box > label.heading, .heading { font-family: Bangers; font-size: 15pt;
+         letter-spacing: 1.5px; color: #FF4655; }
+list.boxed-list { background-color: rgba(22,16,21,0.94); border: 1px solid rgba(225,29,46,0.22);
+         border-radius: 16px; }
+list.boxed-list > row { background-color: transparent; }
+list.boxed-list > row:hover { background-color: rgba(225,29,46,0.08); }
+row.expander list.nested { background-color: rgba(14,10,13,0.55); }
+switch:checked { background-color: #E11D2E; }
+.keycap { font-family: "JetBrains Mono", monospace; font-size: 9pt; font-weight: 700;
+          background-color: rgba(242,233,236,0.08); border: 1px solid rgba(242,233,236,0.18);
+          border-bottom-width: 2px; border-radius: 6px; padding: 1px 7px; }
+.swatch { border-radius: 8px; min-width: 28px; min-height: 28px; border: 1px solid rgba(242,233,236,0.25); }
+.mono { font-family: "JetBrains Mono", monospace; font-size: 9pt; color: #CAB5BF; }
+button.kuro { border-radius: 10px; background-color: rgba(242,233,236,0.07); font-weight: 600; }
+button.kuro:hover { background-color: rgba(225,29,46,0.22); }
+button.kuro.accent { background-color: #E11D2E; color: #FFFFFF; }
+button.kuro.accent:hover { background-color: #FF4655; }
+viewswitcher button:checked { color: #FF4655; }
+"""
+
+
+def run(*cmd, timeout=15):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def in_thread(work, done):
+    def target():
+        try:
+            res = work()
+        except Exception as e:  # noqa: BLE001 — shown, never fatal
+            res = e
+        GLib.idle_add(done, res)
+    threading.Thread(target=target, daemon=True).start()
+
+
+def launch(cmd):
+    try:
+        subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def in_terminal(title, shell_cmd):
+    launch(["alacritty", "--class", "os.bapirlo.Settings.term", "-T", title, "-e", "bash", "-c",
+            shell_cmd + "; echo; read -rp 'Press Enter to close ' _"])
+
+
+def kuro_button(text, accent=False, icon=None):
+    b = Gtk.Button(valign=Gtk.Align.CENTER)
+    if icon:
+        b.set_child(Adw.ButtonContent(label=text, icon_name=icon))
+    else:
+        b.set_label(text)
+    b.add_css_class("kuro")
+    if accent:
+        b.add_css_class("accent")
+    return b
+
+
+def keycaps(accel):
+    mods = [MODS.get(m, m) for m in re.findall(r"<([A-Za-z0-9_]+)>", accel)]
+    key = re.sub(r"<[^>]+>", "", accel)
+    key = {"slash": "/", "period": ".", "comma": ",", "Return": "Enter", "space": "Space"}.get(
+        key, key.upper() if len(key) == 1 else key)
+    return mods + [key]
+
+
+def split_summary(s):
+    """'Stop the animation (Eco / quiet mode)' → ('Stop the animation', 'Eco / quiet mode')"""
+    s = s.strip().rstrip(".")
+    m = re.match(r"^(.*?)\s*\((.+)\)\s*$", s)
+    return (m.group(1), m.group(2)) if m and m.group(1) else (s, "")
+
+
+# ---------------------------------------------------------------- extensions over D-Bus
+class Shell:
+    def __init__(self):
+        self.proxy = None
+        try:
+            self.proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None, "org.gnome.Shell.Extensions",
+                "/org/gnome/Shell/Extensions", "org.gnome.Shell.Extensions", None)
+        except GLib.Error:
+            pass
+
+    def state(self, uuid):
+        """1 = running, 2 = off, 3/4 = error/out of date, None = shell unreachable"""
+        if not self.proxy:
+            return None
+        try:
+            info = self.proxy.call_sync("GetExtensionInfo", GLib.Variant("(s)", (uuid,)),
+                                        Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+            return int(info.get("state", 0)) if info else None
+        except GLib.Error:
+            return None
+
+    def set_enabled(self, uuid, on):
+        if not self.proxy:
+            return False
+        try:
+            self.proxy.call_sync("EnableExtension" if on else "DisableExtension", GLib.Variant("(s)", (uuid,)),
+                                 Gio.DBusCallFlags.NONE, 5000, None)
+            return True
+        except GLib.Error:
+            return False
+
+
+def kuro_extensions():
+    exts = []
+    try:
+        names = sorted(n for n in os.listdir(EXT_DIR) if n.endswith("@bapirlo-os"))
+    except OSError:
+        return exts
+    for uuid in names:
+        d = os.path.join(EXT_DIR, uuid)
+        try:
+            with open(os.path.join(d, "metadata.json")) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        settings = None
+        sid = meta.get("settings-schema")
+        sdir = os.path.join(d, "schemas")
+        if sid and os.path.exists(os.path.join(sdir, "gschemas.compiled")):
+            try:
+                src = Gio.SettingsSchemaSource.new_from_directory(sdir, Gio.SettingsSchemaSource.get_default(), False)
+                schema = src.lookup(sid, False)
+                if schema:
+                    settings = (Gio.Settings.new_full(schema, None, None), schema, xml_order(sdir))
+            except GLib.Error:
+                pass
+        # extensions installed before the rename still carry the old name in their metadata
+        desc = re.sub(r"^(Bapirlo|Kuro) OS: ", "", meta.get("description", "")).replace("Bapirlo OS", "Kuro OS")
+        name = meta.get("name", uuid).replace("Bapirlo", "Kuro")
+        exts.append({"uuid": uuid, "name": name, "desc": desc[:1].upper() + desc[1:], "settings": settings})
+    exts.sort(key=lambda e: e["name"].lower())
+    return exts
+
+
+def xml_order(sdir):
+    """Key names in the order the schema file lists them (Gio's own order is arbitrary)."""
+    names = []
+    for fn in sorted(os.listdir(sdir)):
+        if fn.endswith(".gschema.xml"):
+            with open(os.path.join(sdir, fn)) as f:
+                names += re.findall(r'<key\s[^>]*name="([^"]+)"', f.read())
+    return names
+
+
+def setting_rows(short, settings, schema, order):
+    """One Adw row per key the user can sensibly change."""
+    rows = []
+    keys = schema.list_keys()
+    for key in sorted(keys, key=lambda k: order.index(k) if k in order else len(order)):
+        if key in HIDE.get(short, ()):
+            continue
+        k = schema.get_key(key)
+        title, sub = split_summary(k.get_summary() or key.replace("-", " ").capitalize())
+        vtype = k.get_value_type().dup_string()
+        rtype, rvals = k.get_range().unpack()
+        row = None
+        if vtype == "b":
+            row = Adw.SwitchRow(title=title, subtitle=sub)
+            settings.bind(key, row, "active", Gio.SettingsBindFlags.DEFAULT)
+        elif vtype in ("i", "u", "d"):
+            lo, hi = (rvals if rtype == "range" else ((0.0, 10.0) if vtype == "d" else (0, 10000)))
+            step = 1 if vtype != "d" else (0.05 if hi - lo <= 2 else 0.1)
+            row = Adw.SpinRow.new_with_range(lo, hi, step)
+            row.set_title(title)
+            row.set_subtitle(sub)
+            row.set_digits(2 if vtype == "d" else 0)
+            settings.bind(key, row, "value", Gio.SettingsBindFlags.DEFAULT)
+        elif vtype == "s" and rtype in ("enum", "choices") and rvals:
+            choices = list(rvals)
+            row = Adw.ComboRow(title=title, subtitle=sub, model=Gtk.StringList.new(
+                [c.replace("-", " ").capitalize() for c in choices]))
+            cur = settings.get_string(key)
+            row.set_selected(choices.index(cur) if cur in choices else 0)
+            row.connect("notify::selected", lambda r, _p, key=key, ch=choices:
+                        settings.get_string(key) != ch[r.get_selected()] and settings.set_string(key, ch[r.get_selected()]))
+        elif vtype == "s":
+            row = Adw.EntryRow(title=title, show_apply_button=True, text=settings.get_string(key))
+            row.connect("apply", lambda r, key=key: settings.set_string(key, r.get_text()))
+        elif vtype == "as":
+            vals = settings.get_strv(key)
+            if not vals or not all(ACCEL.match(v) for v in vals):
+                continue                       # lists with their own editor (cards, apps …)
+            row = Adw.ActionRow(title=title, subtitle=sub)
+            caps = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+            for i, a in enumerate(vals[:2]):
+                if i:
+                    caps.append(Gtk.Label(label="or", css_classes=["dim-label"]))
+                for c in keycaps(a):
+                    caps.append(Gtk.Label(label=c, css_classes=["keycap"]))
+            row.add_suffix(caps)
+        if row is not None:
+            row.set_tooltip_text(key)
+            rows.append(row)
+    return rows
+
+
+# ---------------------------------------------------------------- app
+class KuroSettings(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win = None
+        self.shell = None
+
+    def do_activate(self):
+        if self.win:
+            self.win.present()
+            return
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        prov = Gtk.CssProvider()
+        prov.load_from_string(CSS + kuro_pages.CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.shell = Shell()
+        self.swatch_css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.swatch_css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.win = Adw.ApplicationWindow(application=self, title="Kuro Settings",
+                                         default_width=860, default_height=900)
+        self.win.add_css_class("bapirlo-settings")
+        self.toasts = Adw.ToastOverlay()
+        stack = Adw.ViewStack()
+        stack.add_titled_with_icon(self.page_extensions(), "extensions", "Extensions", "application-x-addon-symbolic")
+        stack.add_titled_with_icon(self.page_modes(), "modes", "Modes & tools", "applications-system-symbolic")
+        self.power = kuro_pages.PowerPage(self, run, BIN)
+        stack.add_titled_with_icon(self.power.page, "power", "Battery", "battery-good-symbolic")
+        self.screentime = kuro_pages.ScreenTimePage(self)
+        stack.add_titled_with_icon(self.screentime.page, "screentime", "Screen time", "preferences-system-time-symbolic")
+        self.snippets = kuro_pages.SnippetsPage(self)
+        stack.add_titled_with_icon(self.snippets.page, "snippets", "Snippets", "insert-text-symbolic")
+        stack.add_titled_with_icon(self.page_undo(), "undo", "Undo", "edit-undo-symbolic")
+        view = Adw.ToolbarView()
+        hb = Adw.HeaderBar()
+        hb.set_title_widget(Adw.ViewSwitcher(stack=stack, policy=Adw.ViewSwitcherPolicy.WIDE))
+        view.add_top_bar(hb)
+        self.toasts.set_child(stack)
+        view.set_content(self.toasts)
+        self.win.set_content(view)
+        for a in sys.argv:                  # --page=modes | --page=undo
+            if a.startswith("--page="):
+                stack.set_visible_child_name(a.split("=", 1)[1])
+        self.win.present()
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def header(self, page, title, tagline):
+        g = Adw.PreferencesGroup()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.append(Gtk.Label(label=title, xalign=0, css_classes=["brand"]))
+        box.append(Gtk.Label(label=tagline, xalign=0, wrap=True, css_classes=["tagline"]))
+        g.add(box)
+        page.add(g)
+
+    # ------------------------------------------------------------ Extensions
+    def page_extensions(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "KURO SETTINGS", "Every Kuro extension and its settings. Changes apply at once.")
+        g = Adw.PreferencesGroup(title="Kuro extensions")
+        for e in kuro_extensions():
+            short = e["uuid"].split("@")[0]
+            sw = Gtk.Switch(valign=Gtk.Align.CENTER)
+            state = self.shell.state(e["uuid"])
+            sw.set_active(state == 1)
+            sw.set_sensitive(state is not None)
+            if state not in (None, 1, 2):
+                sw.set_tooltip_text("This extension has an error — run the doctor (Modes & tools)")
+            sw.connect("state-set", self.on_ext_switch, e)
+            rows = setting_rows(short, *e["settings"]) if e["settings"] else []
+            if rows:
+                row = Adw.ExpanderRow(title=e["name"], subtitle=e["desc"], subtitle_lines=2)
+                row.add_suffix(sw)
+                for r in rows:
+                    row.add_row(r)
+            else:
+                row = Adw.ActionRow(title=e["name"], subtitle=e["desc"], subtitle_lines=2)
+                row.add_suffix(sw)
+                row.set_activatable_widget(sw)
+            g.add(row)
+        page.add(g)
+        return page
+
+    def on_ext_switch(self, sw, on, e):
+        if not self.shell.set_enabled(e["uuid"], on):
+            self.toast(f"Couldn't switch {e['name']} {'on' if on else 'off'}")
+            return True                     # keep the old position
+        self.toast(f"{e['name']} {'on' if on else 'off'}")
+        return False
+
+    # ------------------------------------------------------------ Modes & tools
+    def page_modes(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "MODES & TOOLS", "One switch per mode. Gaming and Quiet exclude each other; "
+                                           "a mode ends at log out.")
+        g = Adw.PreferencesGroup(title="Modes")
+        self.mode_rows = {}
+        for key, title, sub in (("gaming", "Gaming", "Performance profile, Do Not Disturb, instant replay"),
+                                ("quiet", "Quiet", "Power saver, silent fans, no event sounds"),
+                                ("dnd", "Do Not Disturb", "No notification banners")):
+            row = Adw.SwitchRow(title=title, subtitle=sub)
+            row.handler = row.connect("notify::active", self.on_mode, key)
+            self.mode_rows[key] = row
+            g.add(row)
+        page.add(g)
+        self.refresh_modes()
+        page.add(kuro_pages.bedtime_group(self, run, BIN))
+
+        g = Adw.PreferencesGroup(title="Tools")
+        tools = (
+            ("Health check", "Extensions, services, snapshots, disk — changes nothing", "Run",
+             lambda *_: in_terminal("Kuro Doctor", shlex.quote(os.path.join(BIN, "bapirlo-doctor")))),
+            ("Update the system", "Snapshot first, then official repos + AUR", "Update",
+             lambda *_: launch(["alacritty", "--class", "bapirlo-update", "-T", "Kuro update",
+                                "-e", os.path.join(BIN, "bapirlo-update")])),
+            ("Theme Studio", "Recolour the whole system from a wallpaper", "Open",
+             lambda *_: launch([os.path.join(ROOT, "studio", "bapirlo-theme-studio")])),
+            ("Wallpapers", "Still, live and 3D wallpapers", "Open",
+             lambda *_: launch([os.path.join(ROOT, "wallpaper", "bapirlo-wallpapers")])),
+            ("Welcome", "Today, weather, health and focus", "Open",
+             lambda *_: launch([os.path.join(ROOT, "welcome-app", "bapirlo-welcome")])),
+        )
+        for title, sub, btn, cb in tools:
+            row = Adw.ActionRow(title=title, subtitle=sub)
+            b = kuro_button(btn)
+            b.connect("clicked", cb)
+            row.add_suffix(b)
+            g.add(row)
+        for title, accel in (("Shortcut cheat sheet", "<Super>slash"), ("Colour picker", "<Shift><Super>c"),
+                             ("Screen ruler", "<Shift><Super>m")):
+            row = Adw.ActionRow(title=title)
+            caps = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+            for c in keycaps(accel):
+                caps.append(Gtk.Label(label=c, css_classes=["keycap"]))
+            row.add_suffix(caps)
+            g.add(row)
+        page.add(g)
+
+        self.colour_group = Adw.PreferencesGroup(title="Recent colours",
+                                                 description="From the colour picker (Super+Shift+C). Click to copy.")
+        pick = kuro_button("Pick", icon="color-select-symbolic")
+        pick.connect("clicked", lambda *_: launch([os.path.join(BIN, "bapirlo-capture"), "pick"]))
+        self.colour_group.set_header_suffix(pick)
+        self.colour_rows = []
+        self.fill_colours()
+        page.add(self.colour_group)
+        return page
+
+    def refresh_modes(self):
+        def work():
+            try:
+                return json.loads(run(os.path.join(BIN, "bapirlo-mode"), "status"))
+            except ValueError:
+                return {}
+
+        def done(st):
+            if isinstance(st, dict):
+                for key, row in self.mode_rows.items():
+                    row.handler_block(row.handler)
+                    row.set_active(bool(st.get(key)))
+                    row.handler_unblock(row.handler)
+        in_thread(work, done)
+
+    def on_mode(self, row, _p, key):
+        on = row.get_active()
+        in_thread(lambda: run(os.path.join(BIN, "bapirlo-mode"), key, "on" if on else "off", timeout=30),
+                  lambda _r: self.refresh_modes())
+
+    def fill_colours(self):
+        for r in self.colour_rows:
+            self.colour_group.remove(r)
+        self.colour_rows = []
+        try:
+            with open(COLOURS) as f:
+                lines = [ln.split() for ln in f.read().splitlines() if ln.strip()]
+        except OSError:
+            lines = []
+        seen, recent = set(), []
+        for parts in reversed(lines):
+            hexv = next((p for p in parts if p.startswith("#")), None)
+            if hexv and hexv not in seen:
+                seen.add(hexv)
+                recent.append((hexv, " ".join(parts[:2])))
+            if len(recent) == 8:
+                break
+        if not recent:
+            row = Adw.ActionRow(title="No colours yet", subtitle="Press Super+Shift+C and click anywhere")
+            self.colour_group.add(row)
+            self.colour_rows.append(row)
+        if recent:
+            self.swatch_css.load_from_string("".join(f".sw-{h[1:]} {{ background-color: {h}; }}" for h, _w in recent))
+        for hexv, when in recent:
+            row = Adw.ActionRow(title=hexv, subtitle=when, activatable=True)
+            row.add_prefix(Gtk.Box(valign=Gtk.Align.CENTER, css_classes=["swatch", f"sw-{hexv[1:]}"]))
+            row.add_suffix(Gtk.Image(icon_name="edit-copy-symbolic"))
+            row.connect("activated", self.copy, hexv)
+            self.colour_group.add(row)
+            self.colour_rows.append(row)
+
+    def copy(self, _row, text):
+        Gdk.Display.get_default().get_clipboard().set(text)
+        self.toast(f"{text} copied")
+
+    # ------------------------------------------------------------ Undo
+    def page_undo(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "UNDO", "Every change round saved what it replaced. Restore puts that one change "
+                                  "back. Newest first — if a newer round built on an older one, undo the newer one first.")
+        g = Adw.PreferencesGroup(title="Backups", description="Restore opens a terminal so you see what it does "
+                                                              "(and type your password when it needs sudo).")
+        folder = kuro_button("Folder", icon="folder-open-symbolic")
+        folder.connect("clicked", lambda *_: launch(["gio", "open", BACKUPS]))
+        g.set_header_suffix(folder)
+        page.add(g)
+        self.undo_group = g
+        spinner = Adw.ActionRow(title="Reading backups…")
+        g.add(spinner)
+        in_thread(backups, lambda res: self.fill_undo(res, spinner))
+        return page
+
+    def fill_undo(self, items, spinner):
+        self.undo_group.remove(spinner)
+        if isinstance(items, Exception) or not items:
+            self.undo_group.add(Adw.ActionRow(title="No backups found", subtitle=BACKUPS))
+            return
+        for b in items:
+            sub = f"{b['when']:%d %b %Y · %H:%M}"
+            row = Adw.ActionRow(title=b["title"], subtitle=sub)
+            if b["cmd"]:
+                row.set_tooltip_text(command_text(b))
+                if b["root"]:
+                    row.add_suffix(Gtk.Image(icon_name="dialog-password-symbolic", tooltip_text="Needs sudo"))
+                btn = kuro_button("Restore…")
+                btn.connect("clicked", self.confirm_restore, b)
+                row.set_subtitle(f"{sub}  ·  {command_text(b)}")
+            else:
+                btn = kuro_button("Open folder")
+                btn.connect("clicked", lambda _b, d=b["dir"]: launch(["gio", "open", d]))
+                row.set_subtitle(f"{sub}  ·  no restore command — the folder has the saved files")
+            row.set_subtitle_lines(2)
+            row.add_suffix(btn)
+            self.undo_group.add(row)
+
+    def confirm_restore(self, _btn, b):
+        d = Adw.AlertDialog(heading=f"Restore “{b['title']}”?",
+                            body=f"This puts back what was saved on {b['when']:%d %b %Y at %H:%M}.\n\n"
+                                 f"Runs:  {command_text(b)}\n\n"
+                                 + ("It needs sudo — the terminal will ask for your password.\n" if b["root"] else "")
+                                 + "Some changes need a log out / in afterwards.")
+        d.add_response("cancel", "Cancel")
+        d.add_response("restore", "Restore")
+        d.set_response_appearance("restore", Adw.ResponseAppearance.DESTRUCTIVE)
+        d.set_default_response("cancel")
+        d.set_close_response("cancel")
+        d.connect("response", self.on_restore_response, b)
+        d.present(self.win)
+
+    def on_restore_response(self, _d, resp, b):
+        if resp != "restore":
+            return
+        cmd = " ".join(shlex.quote(a) for a in b["cmd"])
+        in_terminal(f"Kuro — restore {b['title']}", ("sudo " if b["root"] else "") + cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(KuroSettings().run([a for a in sys.argv if not a.startswith("--")]))
