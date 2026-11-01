@@ -1,0 +1,8 @@
+/* Kuro Search: compact rows in the overview (the runner/ArcMenu get small icons from createIcon) */
+.kuro-compact .list-search-result { padding: 3px 10px; min-height: 0; }
+.kuro-compact .list-search-result-content { spacing: 8px; }
+.kuro-compact .list-search-result-title { spacing: 8px; font-size: 0.92em; }
+.kuro-compact .list-search-result-description { font-size: 0.8em; }
+.kuro-compact .list-search-results { spacing: 0; }
+.kuro-compact .search-provider-icon { padding: 4px 8px; }
+.kuro-compact .search-provider-icon .list-search-provider-content { spacing: 6px; }

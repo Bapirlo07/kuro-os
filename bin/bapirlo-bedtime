@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Kuro OS — bedtime: at the time you set, the laptop winds down until the morning.
+  bapirlo-bedtime                  status
+  bapirlo-bedtime now              start bedtime now (ends at the wake-up time)
+  bapirlo-bedtime off              end it now (tonight's schedule won't start it again)
+  bapirlo-bedtime set 23:00 07:00  bedtime and wake-up time (the timer follows)
+  bapirlo-bedtime on|disable       schedule on / off (Kuro Settings → Modes & tools → Bedtime)
+  bapirlo-bedtime wallpaper on|off use a night wallpaper during bedtime (default on)
+  bapirlo-bedtime tick             what the timer runs at both times and after login
+
+During bedtime: Quiet mode (power saver, silent fans, no event sounds) + Do Not Disturb, a warmer
+Night Light and a wallpaper tagged "night" (the colours follow it). At the wake-up time everything it
+changed goes back — a mode you had switched on yourself stays on.
+Settings ~/.config/bapirlo/bedtime.json · state ~/.local/state/bapirlo/bedtime.json
+"""
+import datetime
+import json
+import os
+import random
+import subprocess
+import sys
+
+from gi.repository import Gio, GLib
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(BIN, "..", "lib"))
+
+CONF = os.path.join(GLib.get_user_config_dir(), "bapirlo", "bedtime.json")
+STATE = os.path.join(GLib.get_user_state_dir(), "bapirlo", "bedtime.json")
+TIMER_DIR = os.path.join(GLib.get_user_config_dir(), "systemd", "user", "bapirlo-bedtime.timer.d")
+DEFAULT = {"enabled": True, "start": "23:00", "end": "07:00", "wallpaper": True, "warm": 2300}
+NL = "org.gnome.settings-daemon.plugins.color"
+
+
+def load(path, default):
+    try:
+        with open(path) as f:
+            return {**default, **json.load(f)}
+    except (OSError, ValueError):
+        return dict(default)
+
+
+def save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
+
+
+def hm(s):
+    h, m = (int(x) for x in s.split(":"))
+    if not (0 <= h < 24 and 0 <= m < 60):
+        raise ValueError(s)
+    return datetime.time(h, m)
+
+
+def window(c, now):
+    """(start, end) datetimes of the bedtime that contains `now`, or of the next one"""
+    s, e = hm(c["start"]), hm(c["end"])
+    for day in (now.date() - datetime.timedelta(days=1), now.date()):
+        a = datetime.datetime.combine(day, s)
+        b = datetime.datetime.combine(day if e > s else day + datetime.timedelta(days=1), e)
+        if a <= now < b:
+            return a, b
+    a = datetime.datetime.combine(now.date(), s)
+    if a <= now:
+        a += datetime.timedelta(days=1)
+    return a, datetime.datetime.combine(a.date() if e > s else a.date() + datetime.timedelta(days=1), e)
+
+
+def mode_status():
+    try:
+        return json.loads(subprocess.run([os.path.join(BIN, "bapirlo-mode"), "status"], capture_output=True,
+                                         text=True, timeout=20).stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {}
+
+
+def mode(name, on):
+    subprocess.run([os.path.join(BIN, "bapirlo-mode"), name, "on" if on else "off"], timeout=30,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def notify(title, body):
+    subprocess.run(["notify-send", "-a", "Kuro bedtime", "-i", "weather-clear-night-symbolic", title, body],
+                   stderr=subprocess.DEVNULL)
+
+
+def night_wallpaper():
+    import bapirlo_wallpaper as W
+    its = W.items()
+    pool = W.slot_pool("night", its)
+    return random.Random(datetime.date.today().toordinal()).choice(pool) if pool else None
+
+
+def start(c, until):
+    st = load(STATE, {})
+    if st.get("on"):
+        return
+    notify("Bedtime", f"Quiet mode and Do Not Disturb until {until:%H:%M}. Sleep well.")
+    before = mode_status()
+    nl = Gio.Settings.new(NL)
+    st = {"on": True, "until": until.isoformat(), "turned_on": [],
+          "night_light": [nl.get_boolean("night-light-enabled"), nl.get_uint("night-light-temperature")]}
+    for m in ("quiet", "dnd"):
+        if not before.get(m):
+            mode(m, True)
+            st["turned_on"].append(m)
+    if c.get("warm"):
+        nl.set_boolean("night-light-enabled", True)
+        nl.set_uint("night-light-temperature", int(c["warm"]))
+    if c.get("wallpaper"):
+        st["wallpaper"] = night_wallpaper()
+    save(STATE, st)              # before the wallpaper tick: it reads "wallpaper" from here
+    Gio.Settings.sync()
+    if st.get("wallpaper"):
+        import bapirlo_wallpaper as W
+        W.tick(force=True)
+
+
+def stop(skip_until=None):
+    st = load(STATE, {})
+    if st.get("on"):
+        for m in st.get("turned_on", []):
+            mode(m, False)
+        en, temp = st.get("night_light", [None, None])
+        nl = Gio.Settings.new(NL)
+        if temp:
+            nl.set_uint("night-light-temperature", int(temp))
+        if en is not None:
+            nl.set_boolean("night-light-enabled", bool(en))
+        Gio.Settings.sync()
+    had_wall = bool(st.get("wallpaper"))
+    save(STATE, {"on": False, "skip_until": skip_until})
+    if had_wall:
+        import bapirlo_wallpaper as W
+        W.tick(force=True)
+
+
+def tick():
+    c, st = load(CONF, DEFAULT), load(STATE, {})
+    now = datetime.datetime.now()
+    a, b = window(c, now)
+    inside = a <= now < b
+    if st.get("on"):
+        until = datetime.datetime.fromisoformat(st.get("until") or b.isoformat())
+        if now >= until:
+            stop()
+        return
+    skip = st.get("skip_until")
+    if skip and now < datetime.datetime.fromisoformat(skip):
+        return
+    if c["enabled"] and inside:
+        start(c, b)
+
+
+def write_timer(c):
+    os.makedirs(TIMER_DIR, exist_ok=True)
+    with open(os.path.join(TIMER_DIR, "times.conf"), "w") as f:
+        f.write("# written by bapirlo-bedtime set\n[Timer]\nOnCalendar=\n"
+                f"OnCalendar=*-*-* {c['start']}:00\nOnCalendar=*-*-* {c['end']}:00\n")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "--user", "restart", "bapirlo-bedtime.timer"], stderr=subprocess.DEVNULL)
+
+
+def status():
+    c, st = load(CONF, DEFAULT), load(STATE, {})
+    now = datetime.datetime.now()
+    a, b = window(c, now)
+    lines = [f"schedule  {'on' if c['enabled'] else 'off'}   {c['start']} → {c['end']}   "
+             f"night wallpaper {'on' if c['wallpaper'] else 'off'}   warm {c['warm']} K"]
+    if st.get("on"):
+        lines.append(f"now       bedtime until {datetime.datetime.fromisoformat(st['until']):%H:%M}"
+                     + (f" (switched on: {', '.join(st['turned_on'])})" if st.get("turned_on") else ""))
+    else:
+        lines.append(f"now       awake · next bedtime {a:%a %H:%M}" if c["enabled"] else "now       awake")
+    return "\n".join(lines)
+
+
+def main(argv):
+    verb = argv[0] if argv else "status"
+    c = load(CONF, DEFAULT)
+    now = datetime.datetime.now()
+    if verb in ("-h", "--help", "help"):
+        print(__doc__.strip())
+    elif verb == "status":
+        print(status())
+    elif verb == "json":
+        print(json.dumps({**c, "active": bool(load(STATE, {}).get("on"))}))
+    elif verb == "now":
+        a, b = window(c, now)
+        start(c, b if a <= now < b else datetime.datetime.combine(
+            now.date() + datetime.timedelta(days=1 if now.time() >= hm(c["end"]) else 0), hm(c["end"])))
+    elif verb == "off":
+        a, b = window(c, now)
+        stop(skip_until=b.isoformat() if a <= now < b else None)
+    elif verb == "tick":
+        tick()
+    elif verb == "set" and len(argv) == 3:
+        try:
+            hm(argv[1]), hm(argv[2])
+        except ValueError:
+            print("times are HH:MM, e.g. bapirlo-bedtime set 23:00 07:00", file=sys.stderr)
+            return 2
+        c.update(start=argv[1], end=argv[2])
+        save(CONF, c)
+        write_timer(c)
+        print(status())
+    elif verb in ("on", "disable"):
+        c["enabled"] = verb == "on"
+        save(CONF, c)
+        print(status())
+    elif verb == "wallpaper" and len(argv) == 2 and argv[1] in ("on", "off"):
+        c["wallpaper"] = argv[1] == "on"
+        save(CONF, c)
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

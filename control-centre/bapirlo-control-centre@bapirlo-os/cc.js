@@ -40,7 +40,7 @@ function makeTile(id, cc) {
     case 'battery': return new T.BatteryTile(id, cc);
     case 'storage': return new T.StorageTile(id, cc);
     case 'media': return new T.MediaTile(id, cc);
-    case 'volume': return new T.SliderTile(id, cc, {find: T.FIND.volume, title: 'Sound', icon: 'audio-volume-high-symbolic'});
+    case 'volume': return new T.SliderTile(id, cc, {find: T.FIND.volume, title: 'Sound', icon: 'audio-volume-high-symbolic', mixer: true});
     case 'airplay': return new T.CommandTile(id, cc, {title: 'AirPlay', onTitle: 'AirPlay On', icon: 'bapirlo-airplay-symbolic', script: 'bapirlo-airplay'});
     case 'remote': return new T.CommandTile(id, cc, {title: 'Remote', onTitle: 'Remote On', icon: 'bapirlo-remote-symbolic', script: 'bapirlo-remote'});
     case 'captions': return new T.CommandTile(id, cc, {title: 'Captions', icon: 'bapirlo-captions-symbolic', script: 'bapirlo-captions'});

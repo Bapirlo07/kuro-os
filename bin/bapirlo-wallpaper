@@ -14,6 +14,10 @@
   bapirlo-wallpaper depth [FILE]       depth map for the 3D wallpaper (bapirlo-live); --setup installs the model
   bapirlo-wallpaper prepare FILE       battery copy + lock-screen animation + subject (run after each change)
   bapirlo-wallpaper watch              follow the charger (bapirlo-wallpaper-power.service)
+  bapirlo-wallpaper workspace [list]   which workspaces have their own wallpaper
+  bapirlo-wallpaper workspace N set FILE | clear   give workspace N (1 = first) its own wallpaper / back to the normal one
+  bapirlo-wallpaper workspace pick     open Wallpapers to pick one for the workspace on screen
+  bapirlo-wallpaper workspace N        (the top bar) workspace N is on screen now
   bapirlo-wallpaper list | status
   bapirlo-wallpaper tick [--no-theme]  what the timer runs every 10 minutes (and Theme Studio after a change)
 """
@@ -52,6 +56,33 @@ def main(argv):
             del args[i:i + 2]
         for p in W.add(args, slot):
             print(p)
+    elif verb == "workspace":
+        if not args or args[0] == "list":
+            ws = W.conf().get("workspaces") or {}
+            cur = W.current_workspace()
+            for n in sorted(ws, key=int):
+                print(f"{'*' if int(n) == cur else ' '} {n}  {ws[n]}")
+            if not ws:
+                print("no workspace has its own wallpaper (all show the normal one)")
+        elif args[0] == "pick":
+            os.execv(APP, [APP, "--workspace", str(W.current_workspace())])
+        elif args[0].isdigit() and len(args) == 1:
+            W.switch_workspace(int(args[0]))
+        elif args[0].isdigit() and args[1] == "clear":
+            W.set_workspace(int(args[0]), None)
+        elif args[0].isdigit() and args[1] == "set" and len(args) > 2:
+            f = os.path.abspath(os.path.expanduser(args[2]))
+            known = {i["path"] for i in W.items(include_hidden=True)}
+            if f not in known:
+                new = W.add([f])
+                if not new:
+                    print(f"not a picture or video I can use: {f}", file=sys.stderr)
+                    return 1
+                f = new[0]
+            W.set_workspace(int(args[0]), f)
+        else:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
     elif verb == "next":
         W.next_one()
     elif verb == "mode" and args and args[0] in W.MODES:

@@ -288,3 +288,20 @@
 .bapirlo-intro-title { font-size: 64px; font-weight: 300; color: #fff; text-shadow: 0 2px 22px rgba(0, 0, 0, 0.7); }
 .bapirlo-intro-date { font-size: 17px; font-weight: 500; letter-spacing: 3px; color: rgba(255, 255, 255, 0.72);
                       text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7); }
+
+/* screen time card */
+.bdw-screentime { width: 268px; }
+.bdw-st-top { margin-top: 2px; }
+.bdw-st-total { font-size: 20pt; font-weight: 800; }
+.bdw-st-week { font-size: 9pt; color: rgba(242, 233, 236, 0.62); }
+.bdw-st-list { spacing: 8px; margin-top: 8px; }
+.bdw-st-row { spacing: 10px; }
+.bdw-st-name { font-size: 9.5pt; }
+.bdw-st-time { font-size: 9pt; color: rgba(242, 233, 236, 0.62); font-feature-settings: "tnum"; }
+.bdw-st-track { height: 4px; border-radius: 2px; background-color: rgba(242, 233, 236, 0.08); margin-top: 3px; }
+.bdw-st-bar { height: 4px; border-radius: 2px; background-color: #FF4655; }
+
+/* to-do due day (round 23) */
+.bdw-todo-due { font-size: 8.5pt; font-weight: 700; color: rgba(242, 233, 236, 0.6); margin-left: 6px; }
+.bdw-todo-due.bdw-today { color: #FFB020; }
+.bdw-todo-due.bdw-overdue { color: #FF4655; }

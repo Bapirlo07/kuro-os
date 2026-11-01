@@ -6,16 +6,19 @@
 //                in edit mode (Super+Alt+E, or Super+Alt+D jumps straight to "add"); the terminal
 //                has `bapirlo-todo add|done|list`. The file is watched, so both stay in step.
 //   NOTES        one free-text note, ~/.local/state/bapirlo/desk/notes.txt, typed in edit mode.
+//   SCREEN TIME  today's total, top apps and this week (counted by screentime.js, kept on this computer).
 // Each card: {actor, setEditing(on), tick(visible), focus(), destroy()}.
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import {PlayerManager} from './mpris.js';
 import {resolveArt} from './art.js';
 import {STATE_DIR, label, readJson, writeJson} from './util.js';
+import {dayKey, hm, readDay} from './screentime.js';
 
 const TODO_FILE = GLib.build_filenamev([STATE_DIR, 'desk', 'todo.json']);
 const NOTES_FILE = GLib.build_filenamev([STATE_DIR, 'desk', 'notes.txt']);
@@ -278,6 +281,17 @@ export class TodoCard {
             const text = label(it.text, it.done ? 'bdw-todo-text bdw-done' : 'bdw-todo-text');
             text.x_expand = true;
             row.add_child(text);
+            // due day (round 23: Kuro Flow text → task, bapirlo-todo add --due)
+            if (it.due && !it.done && /^\d{4}-\d\d-\d\d$/.test(it.due)) {
+                const [y, mo, d] = it.due.split('-').map(Number);
+                const dueDay = GLib.DateTime.new_local(y, mo, d, 0, 0, 0);
+                const now = GLib.DateTime.new_now_local();
+                const today = GLib.DateTime.new_local(now.get_year(), now.get_month(), now.get_day_of_month(), 0, 0, 0);
+                const days = Math.round(dueDay.difference(today) / 86400e6);
+                const when = days < 0 ? 'overdue' : days === 0 ? 'today' : days === 1 ? 'tomorrow'
+                    : days < 7 ? dueDay.format('%a') : dueDay.format('%-d %b');
+                row.add_child(label(when, days < 0 ? 'bdw-todo-due bdw-overdue' : days === 0 ? 'bdw-todo-due bdw-today' : 'bdw-todo-due'));
+            }
             if (this._editing) {
                 const del = new St.Button({style_class: 'bdw-todo-del', can_focus: true,
                     child: new St.Icon({icon_name: 'window-close-symbolic', icon_size: 12}),
@@ -408,6 +422,78 @@ export class NotesCard {
             this._save();
         }
         this._mon.cancel();
+        this.actor.destroy();
+    }
+}
+
+// ================================================================ screen time
+// today's total, the top apps as bars, and this week (Monday on). Data: screentime.js
+export class ScreenTimeCard {
+    constructor() {
+        this.actor = cardBox('SCREEN TIME', 'bdw-screentime');
+        const top = new St.BoxLayout({style_class: 'bdw-st-top'});
+        this._total = label('', 'bdw-st-total', false);
+        this._week = label('', 'bdw-st-week', false);
+        this._week.x_expand = true;
+        this._week.x_align = Clutter.ActorAlign.END;
+        top.add_child(this._total);
+        top.add_child(this._week);
+        this.actor.add_child(top);
+        this._list = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style_class: 'bdw-st-list'});
+        this.actor.add_child(this._list);
+        this._last = 0;
+        this._load();
+    }
+
+    _load() {
+        this._last = GLib.get_monotonic_time();
+        const now = GLib.DateTime.new_now_local();
+        const today = Object.entries(readDay(dayKey(now)).apps).sort((a, b) => b[1].s - a[1].s);
+        const total = today.reduce((t, [, e]) => t + e.s, 0);
+        let week = 0;
+        for (let i = 0; i < now.get_day_of_week(); i++)       // 1 = Monday … 7 = Sunday
+            week += Object.values(readDay(dayKey(now.add_days(-i))).apps).reduce((t, e) => t + e.s, 0);
+        this._total.text = total ? hm(total) : '—';
+        this._week.text = `this week ${hm(week)}`;
+        this._list.destroy_all_children();
+        if (!today.length) {
+            this._list.add_child(label('Counts the app you\'re using, only on this computer.', 'bdw-empty', false));
+            this._list.get_last_child().clutter_text.line_wrap = true;
+            return;
+        }
+        const max = today[0][1].s;
+        const sys = Shell.AppSystem.get_default();
+        for (const [id, e] of today.slice(0, 4)) {
+            const row = new St.BoxLayout({style_class: 'bdw-st-row'});
+            const app = sys.lookup_app(id);
+            row.add_child(app ? app.create_icon_texture(18) : new St.Icon({icon_name: 'application-x-executable-symbolic', icon_size: 18}));
+            const col = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true});
+            const line = new St.BoxLayout();
+            const name = label(e.name, 'bdw-st-name');
+            name.x_expand = true;
+            line.add_child(name);
+            line.add_child(label(hm(e.s), 'bdw-st-time', false));
+            col.add_child(line);
+            const track = new St.Widget({style_class: 'bdw-st-track', x_expand: true});
+            const bar = new St.Widget({style_class: 'bdw-st-bar'});
+            track.add_child(bar);
+            track.connect('notify::width', () => bar.set_size(Math.max(4, Math.round(track.width * e.s / max)), track.height));
+            col.add_child(track);
+            row.add_child(col);
+            this._list.add_child(row);
+        }
+    }
+
+    setEditing() {}
+
+    focus() {}
+
+    tick(seen) {
+        if (seen && GLib.get_monotonic_time() - this._last > 60e6)
+            this._load();
+    }
+
+    destroy() {
         this.actor.destroy();
     }
 }

@@ -62,11 +62,12 @@ HANABI_SCHEMA = "io.github.jeffshee.hanabi-extension"
 BUSY = "BAPIRLO_WALLPAPER_BUSY"
 SUBJECT = os.path.join(STATE_DIR, "subject.json")
 DEPTH_STATE = os.path.join(STATE_DIR, "depth.json")     # read by bapirlo-live (3D wallpaper)
+WS_STATE = os.path.join(STATE_DIR, "workspace")         # the workspace on screen (1 = first), written by the top bar
 DEPTH_KEEP = 40
 GREETER_STUDIO = "/usr/share/web-greeter/themes/bapirlo/studio"
 BATTERY_MODES = ("lite", "pause")
 DEFAULT_CONF = {"mode": "fixed", "current": "", "shuffle_hours": 3, "theme": True, "live": True, "tags": {}, "hidden": [],
-                "battery": "lite", "lock_live": True}
+                "battery": "lite", "lock_live": True, "workspaces": {}}
 
 
 def log(*a):
@@ -359,6 +360,53 @@ def target(c=None, now=None):
     if c["current"] and os.path.exists(c["current"]):
         return c["current"]
     return paths[0] if paths else ""
+
+
+# ------------------------------------------------------------------ a wallpaper per workspace
+# conf["workspaces"] = {"2": path}: workspace 2 shows its own wallpaper (and the colours follow it);
+# workspaces without one show the normal one (mode fixed/time/shuffle). The top bar writes the
+# workspace on screen to WS_STATE and runs `bapirlo-wallpaper workspace N` after a switch settles.
+def current_workspace():
+    try:
+        with open(WS_STATE) as f:
+            return max(1, int(f.read().strip()))
+    except (OSError, ValueError):
+        return 1
+
+
+def ws_wallpaper(c=None, n=None):
+    p = (c or conf()).get("workspaces", {}).get(str(n or current_workspace()))
+    return p if p and os.path.exists(p) else None
+
+
+def set_workspace(n, path):
+    """Give workspace n its own wallpaper (path), or back to the normal one (None)."""
+    with Lock():
+        c = conf()
+        ws = dict(c.get("workspaces") or {})
+        if path:
+            ws[str(n)] = path
+        else:
+            ws.pop(str(n), None)
+        c["workspaces"] = ws
+        save_conf(c)
+    if n == current_workspace():
+        tick(force=bool(path))
+
+
+def bedtime_wallpaper():
+    """bapirlo-bedtime: the night wallpaper it chose, while bedtime is on."""
+    st = _load(os.path.join(GLib.get_user_state_dir(), "bapirlo", "bedtime.json"), {})
+    p = st.get("wallpaper") if st.get("on") else None
+    return p if p and os.path.exists(p) else None
+
+
+def switch_workspace(n):
+    """The top bar: workspace n is on screen now."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(WS_STATE, "w") as f:
+        f.write(str(n))
+    tick()
 
 
 # ------------------------------------------------------------------ Theme Studio
@@ -708,7 +756,11 @@ def apply(path, theme=None, fade=True, reason=""):
 
 
 def choose(path, fade=True):
-    """You picked this one: Fixed mode, on screen now."""
+    """You picked this one: Fixed mode, on screen now. On a workspace that has its own
+    wallpaper, the pick replaces that workspace's one instead."""
+    if ws_wallpaper():
+        set_workspace(current_workspace(), path)
+        return
     with Lock():
         c = conf()
         c["current"] = path
@@ -798,13 +850,15 @@ def tick(no_theme=False, force=False):
         now, rise, sset, slot, _, _ = sun()
         night_light(rise, sset)
         c, st = conf(), state()
-        want = studio_override(st, slot) or target(c, now)
+        ws = ws_wallpaper(c)
+        bed = bedtime_wallpaper()
+        want = bed or studio_override(st, slot) or ws or target(c, now)
         if not want or not os.path.exists(want):
             Gio.Settings.sync()
             return
         live_wrong = (is_video(want) and live_available() and c["live"]) != bool(st.get("live"))
         if force or want != st.get("path") or live_wrong or not os.path.exists(st.get("still", "")):
-            manual = want != target(c, now)
+            manual = want not in (target(c, now), ws, bed)
             apply(want, theme=False if (no_theme or manual) else None, reason=c["mode"] if not manual else "studio")
         else:
             power_sync()        # the charger watcher does this at once; this is the fallback

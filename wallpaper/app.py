@@ -468,6 +468,10 @@ class WallpaperPage(Gtk.Box):
         self.par_scale.set_tooltip_text("How far it moves")
         self.par_scale.connect("value-changed", self.on_parallax_strength)
         self.par_row.append(self.par_scale)
+        self.ws_sw, self.ws_row = switch_row(
+            "Own wallpaper for this workspace", "On: what you pick now shows only on this workspace (the colours follow "
+            "when you switch to it). Off: it shows the normal wallpaper again", self.on_ws)
+        self.ws_label = self.ws_row.get_last_child()
         self.desk = ext_settings("bapirlo-desk@bapirlo-os", "org.gnome.shell.extensions.bapirlo-desk")
         self.live = ext_settings("bapirlo-live@bapirlo-os", "org.gnome.shell.extensions.bapirlo-live")
         if self.desk:
@@ -491,7 +495,26 @@ class WallpaperPage(Gtk.Box):
             self.par_sw.set_active(self.live.get_boolean("parallax"))
             self.par_scale.set_value(self.live.get_double("parallax-strength"))
         self.par_scale.set_sensitive(self.par_sw.get_active())
+        n = W.current_workspace()
+        self.ws_label.set_label(f"Own wallpaper for workspace {n}")
+        self.ws_sw.set_active(bool(W.ws_wallpaper(c, n)))
         self.syncing = False
+
+    def on_ws(self, sw, _p):
+        if self.syncing:
+            return
+        n = W.current_workspace()
+        if sw.get_active():
+            path = W.state().get("path") or W.target()
+            self.run(f"Workspace {n} keeps this wallpaper — pick another to change it…",
+                     lambda: W.set_workspace(n, path), f"Workspace {n} has its own wallpaper now — pick one")
+        else:
+            self.run(f"Workspace {n} back to the normal wallpaper…", lambda: W.set_workspace(n, None))
+
+    def own_workspace(self):
+        """bapirlo-wallpaper workspace pick: switch it on for the workspace on screen."""
+        if not self.ws_sw.get_active():
+            self.ws_sw.set_active(True)
 
     def on_battery_mode(self, b, mode):
         if self.syncing or not b.get_active():
@@ -816,6 +839,8 @@ class App(Adw.Application):
         self.page = "wallpapers"
         self.add_main_option("page", 0, GLib.OptionFlags.NONE, GLib.OptionArg.STRING,
                              "Open on this tab: wallpapers or theme", "PAGE")
+        self.add_main_option("workspace", 0, GLib.OptionFlags.NONE, GLib.OptionArg.INT,
+                             "Pick a wallpaper for this workspace only (bapirlo-wallpaper workspace pick)", "N")
 
     def do_handle_local_options(self, opts):
         page = opts.lookup_value("page", GLib.VariantType.new("s"))
@@ -823,6 +848,10 @@ class App(Adw.Application):
             # also reaches a window that is already open (the action runs in the first instance)
             self.register(None)
             self.activate_action("page", GLib.Variant("s", page.get_string()))
+        if opts.contains("workspace"):
+            self.register(None)
+            self.activate_action("page", GLib.Variant("s", "wallpapers"))
+            self.activate_action("own-workspace", None)
         return -1
 
     def do_startup(self):
@@ -835,6 +864,13 @@ class App(Adw.Application):
         a = Gio.SimpleAction.new("page", GLib.VariantType.new("s"))
         a.connect("activate", self.on_page_action)
         self.add_action(a)
+        a = Gio.SimpleAction.new("own-workspace", None)
+        a.connect("activate", self.on_own_workspace)
+        self.add_action(a)
+
+    def on_own_workspace(self, *_):
+        self.do_activate()
+        GLib.idle_add(lambda: self.win.walls.own_workspace() and False)
 
     def on_page_action(self, _a, value):
         self.page = value.get_string()

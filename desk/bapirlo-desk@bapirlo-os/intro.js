@@ -74,7 +74,12 @@ export class LoginIntro {
         const rest = {};
         for (const k of Object.keys(start))
             rest[k] = actor[k];
-        this._moved.push([actor, rest]);
+        const entry = [actor, rest];
+        this._moved.push(entry);
+        // Hanabi can swap the wallpaper actor out mid-intro; forget it so _finish never touches a dead actor
+        actor.connectObject('destroy', () => {
+            this._moved = this._moved.filter(e => e !== entry);
+        }, this);
         actor.remove_all_transitions();
         Object.assign(actor, start);
         return rest;
@@ -161,6 +166,8 @@ export class LoginIntro {
                 Object.assign(actor, rest);
             } catch {}                          // e.g. a wallpaper actor swapped out meanwhile
         }
+        for (const [actor] of this._moved)
+            actor.disconnectObject(this);
         this._moved = [];
         this._helloActor?.destroy();
         this._helloActor = null;

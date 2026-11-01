@@ -152,3 +152,14 @@
 .bcc-pill:hover { background-color: rgba(225, 29, 46, 0.25); }
 .bcc-tray-rows { spacing: 8px; }
 .bcc-tray-row { spacing: 8px; }
+
+/* per-app volume (Sound page) */
+.bcc-mix { spacing: 6px; padding-top: 10px; }
+.bcc-mix-title { font-family: "Inter", sans-serif; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; color: rgba(242, 233, 236, 0.6); padding: 0 10px; }
+.bcc-mix-row { spacing: 10px; padding: 6px 10px; border-radius: 10px; }
+.bcc-mix-row:hover { background-color: rgba(242, 233, 236, 0.05); }
+.bcc-mix-icon { border-radius: 8px; padding: 2px; }
+.bcc-mix-icon:hover { background-color: rgba(242, 233, 236, 0.10); }
+.bcc-mix-col { spacing: 2px; }
+.bcc-mix-name { font-family: "Inter", sans-serif; font-size: 10pt; color: #F2E9EC; }
+.bcc-mix-value { font-family: "Inter", sans-serif; font-size: 9pt; color: rgba(242, 233, 236, 0.72); }

@@ -1,0 +1,11 @@
+{
+  "uuid": "bapirlo-search@bapirlo-os",
+  "name": "Kuro Search Actions",
+  "description": "Kuro OS: answers and actions in the overview and ArcMenu search — sums (=12*7), units (5 km in mi) and Kuro commands (wallpaper next, mode gaming, bedtime, grab text…).",
+  "shell-version": [
+    "50",
+    "51"
+  ],
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

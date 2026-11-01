@@ -30,7 +30,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {HOME, STATE_DIR, dayName, hhmm, label, readJson, startOfDay, writeJson} from './util.js';
 import {weatherOf} from './briefing.js';
-import {NotesCard, NowPlayingCard, TodoCard, isControl} from './cards.js';
+import {NotesCard, NowPlayingCard, ScreenTimeCard, TodoCard, isControl} from './cards.js';
 
 const TICK_S = 5;
 const WEATHER_S = 30 * 60;
@@ -51,10 +51,11 @@ export const CARDS = [
     ['nowplaying', 'Now playing'],
     ['todo', 'To-do'],
     ['notes', 'Notes'],
+    ['screentime', 'Screen time'],
 ];
 
 // cards with their own object (cards.js), made only while shown
-const PARTS = {nowplaying: NowPlayingCard, todo: TodoCard, notes: NotesCard};
+const PARTS = {nowplaying: NowPlayingCard, todo: TodoCard, notes: NotesCard, screentime: ScreenTimeCard};
 
 const LAYOUT = GLib.build_filenamev([STATE_DIR, 'desk', 'widgets.json']);
 const PALETTE = GLib.build_filenamev([STATE_DIR, 'studio', 'active.json']);
@@ -106,6 +107,7 @@ ${L} .bdw-meter-name { color: ${c('paper', 0.72)}; }
 ${L} .bdw-track { background-color: ${c('paper', 0.10)}; }
 ${L} .bdw-fill { background-color: ${c('paper')}; }
 ${L} .bdw-fill.bdw-hot { background-color: ${c('ember')}; }
+${L} .bdw-st-bar { background-color: ${c('ember')}; }
 ${L} .bdw-wx-icon, ${L} .bdw-wx-day-icon { color: ${c('paper')}; }
 ${L} .bdw-wx-day-name { color: ${c('paper', 0.6)}; }
 ${L}.bdw-editing { background-color: rgba(0, 0, 0, 0.38); }

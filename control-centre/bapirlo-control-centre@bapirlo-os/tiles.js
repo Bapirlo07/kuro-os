@@ -15,6 +15,8 @@ import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 
+import {buildMixer} from './mixer.js';
+
 export const EASE = Clutter.AnimationMode.EASE_OUT_QUAD;
 const HOME = GLib.get_home_dir();
 const BIN = GLib.build_filenamev([HOME, 'bapirlo-os', 'bin']);
@@ -375,9 +377,10 @@ export function borrowMenu(item, title, iconActor, {scanSpinner = null} = {}) {
 // ------------------------------------------------------------------ slider mirror (volume / brightness)
 export const SliderTile = GObject.registerClass(
 class BapirloSliderTile extends Tile {
-    _init(id, cc, {find, title, icon}) {
+    _init(id, cc, {find, title, icon, mixer = false}) {
         super._init(id, 'full', cc);
         this._find = find;
+        this._mixer = mixer;     // Sound: the page also has a slider per app
         this._title = title;
         this._fallbackIcon = icon;
         this.button.reactive = false;
@@ -452,7 +455,7 @@ class BapirloSliderTile extends Tile {
             icon.gicon = it.gicon;
         else
             icon.icon_name = it.iconName || it.icon_name || this._fallbackIcon;
-        this.expandable = !!it.menu && it.menuEnabled;
+        this.expandable = this._mixer || (!!it.menu && it.menuEnabled);
         this._more.visible = this.expandable;
         this._syncValue();
     }
@@ -469,7 +472,20 @@ class BapirloSliderTile extends Tile {
 
     buildDetail() {
         const it = this._item;
-        return it?.menu ? borrowMenu(it, this._title, this._iconBtn.child) : null;
+        const d = it?.menu && it.menuEnabled !== false ? borrowMenu(it, this._title, this._iconBtn.child) : null;
+        if (!this._mixer)
+            return d;
+        const mix = buildMixer();
+        const page = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true, style_class: 'bcc-sound-page'});
+        if (d)
+            page.add_child(d.actor);
+        page.add_child(mix.actor);
+        const icon = this._iconBtn.child;
+        return {...(d ?? {title: this._title, gicon: icon.gicon, icon: icon.icon_name}), actor: page,
+            onClose: () => {
+                mix.destroy();
+                d?.onClose?.();
+            }};
     }
 
     destroy() {

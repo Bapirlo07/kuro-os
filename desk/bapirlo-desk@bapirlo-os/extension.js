@@ -10,6 +10,8 @@
 //   cards.js      Now playing (live visualizer) · To-do · Notes cards for widgets.js; Super+Alt+D = add a to-do
 //   session.js    reopens last session's apps on their workspaces / spots after login (session-restore)
 //   radial.js     Super+Alt+O: ring of 8 apps around the pointer, in the top bar's look
+//   screentime.js counts which app you use (local files) for the SCREEN TIME card / Kuro Settings (screen-time)
+//   gestures.js   four-finger swipes: up Launchpad · down desktop · left radial · right previous window (gestures)
 //   intro.js      login intro: greeting, wallpaper fades up, bar / dock / widgets fly in (login-intro)
 // Each part follows its own setting and can be switched off alone. Nothing polls while unseen:
 // the widgets tick only while the desktop can be seen, the calendar is read by a short-lived
@@ -35,6 +37,8 @@ import {PrivacyDots} from './privacy.js';
 import {AirPodsChip} from './airpods.js';
 import {RadialLauncher} from './radial.js';
 import {SessionKeeper} from './session.js';
+import {ScreenTimeTracker} from './screentime.js';
+import {FourFingerGestures} from './gestures.js';
 
 const IFACE = `<node><interface name="os.bapirlo.Desk">
   <method name="Launchpad"/>
@@ -76,6 +80,16 @@ export default class BapirloDesk extends Extension {
         toggle('pip-on-top', () => new PipKeeper());
         toggle('privacy-dots', () => new PrivacyDots());
         toggle('airpods', () => new AirPodsChip());
+        toggle('screen-time', () => new ScreenTimeTracker());
+        toggle('gestures', () => {
+            const g = new FourFingerGestures({
+                up: () => this._launchpad.toggle(),
+                down: () => g.toggleDesktop(),
+                left: () => this._toggleRadial(),
+                right: () => g.previousWindow(),
+            });
+            return g;
+        });
 
         Main.wm.addKeybinding('launchpad-toggle', this._settings, Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW, () => this._launchpad.toggle());

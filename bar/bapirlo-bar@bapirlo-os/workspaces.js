@@ -2,7 +2,9 @@
 //   active = crimson pill with a white number · has windows = bright number + ember underline
 //   empty = dim number
 //   click a dot = go there (click the active one = overview) · scroll = previous / next
-//   right-click (or Menu key) a dot = Remove workspace / Add workspace
+//   right-click (or Menu key) a dot = Remove workspace / Add workspace / Own wallpaper…
+// A workspace can have its own wallpaper (bapirlo-wallpaper workspace): when a switch settles, the
+// wallpaper engine is told which workspace is on screen — only if any workspace has one.
 // Removing a workspace never closes anything: its windows move to the previous workspace
 // (the next one when it is the first). Works with dynamic and static workspaces.
 import Clutter from 'gi://Clutter';
@@ -18,6 +20,10 @@ import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Group, attachTooltip, hideTooltip, EASE} from './util.js';
+
+const WALL_CONF = GLib.build_filenamev([GLib.get_user_config_dir(), 'bapirlo', 'wallpaper.json']);
+const WALL_WS = GLib.build_filenamev([GLib.get_user_state_dir(), 'bapirlo', 'wallpaper', 'workspace']);
+const WALL_SETTLE_MS = 900;     // flicking through workspaces never re-themes on the way
 
 const CHIP = 22;   // width of an inactive number
 const PILL = 34;   // width of the active pill
@@ -53,7 +59,10 @@ class BapirloWorkspaceDots extends Group {
         global.workspace_manager.connectObject(
             'notify::n-workspaces', () => this._rebuild(),
             'workspaces-reordered', () => this._rebuild(),
-            'active-workspace-changed', () => this._sync(true),
+            'active-workspace-changed', () => {
+                this._sync(true);
+                this._queueWallpaper();
+            },
             this);
         this.connect('scroll-event', (_a, ev) => this._onScroll(ev));
         this._rebuild();
@@ -187,6 +196,12 @@ class BapirloWorkspaceDots extends Group {
         const add = this._menuItem(menu, 'Add workspace', 'list-add-symbolic', ADD_KEY,
             () => this.addWorkspace(ws));
         add.setSensitive(wm.n_workspaces < MAX_WORKSPACES);
+        this._menuItem(menu, 'Own wallpaper…', 'preferences-desktop-wallpaper-symbolic', '', () => {
+            if (!ws.active)
+                ws.activate(global.get_current_time());
+            this._writeWorkspace(index + 1);
+            this._spawn(['bapirlo-wallpaper', 'workspace', 'pick']);
+        });
 
         Main.uiGroup.add_child(menu.actor);
         this._menuManager.addMenu(menu);
@@ -368,7 +383,46 @@ class BapirloWorkspaceDots extends Group {
         return Clutter.EVENT_STOP;
     }
 
+    // ------------------------------------------------------------ a wallpaper per workspace
+    _queueWallpaper() {
+        if (this._wallId)
+            GLib.source_remove(this._wallId);
+        this._wallId = GLib.timeout_add(GLib.PRIORITY_LOW, WALL_SETTLE_MS, () => {
+            this._wallId = 0;
+            const n = global.workspace_manager.get_active_workspace_index() + 1;
+            let own = {};
+            try {
+                own = JSON.parse(new TextDecoder().decode(GLib.file_get_contents(WALL_CONF)[1])).workspaces ?? {};
+            } catch {}
+            if (Object.keys(own).length)
+                this._spawn(['bapirlo-wallpaper', 'workspace', String(n)]);    // writes WALL_WS + changes it
+            else
+                this._writeWorkspace(n);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _writeWorkspace(n) {
+        try {
+            GLib.mkdir_with_parents(GLib.path_get_dirname(WALL_WS), 0o755);
+            GLib.file_set_contents(WALL_WS, String(n));
+        } catch (e) {
+            logError(e, 'bapirlo-bar: workspace file');
+        }
+    }
+
+    _spawn(argv) {
+        try {
+            Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE);
+        } catch (e) {
+            logError(e, `bapirlo-bar: ${argv[0]}`);
+        }
+    }
+
     destroy() {
+        if (this._wallId)
+            GLib.source_remove(this._wallId);
+        this._wallId = 0;
         if (this._syncId)
             GLib.source_remove(this._syncId);
         this._syncId = 0;

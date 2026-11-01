@@ -58,7 +58,7 @@
     </key>
     <key name="widgets-cards" type="as">
       <default><![CDATA[['clock', 'calendar', 'upnext', 'weather', 'system']]]></default>
-      <summary>Which desktop widget cards show: clock, calendar, upnext, weather, system, nowplaying, todo, notes</summary>
+      <summary>Which desktop widget cards show: clock, calendar, upnext, weather, system, nowplaying, todo, notes, screentime</summary>
     </key>
     <key name="widgets-edit" type="as">
       <default><![CDATA[['<Super><Alt>e']]]></default>
@@ -99,6 +99,14 @@
     <key name="airpods" type="b">
       <default>true</default>
       <summary>AirPods battery chip in the top bar (data from LibrePods)</summary>
+    </key>
+    <key name="gestures" type="b">
+      <default>true</default>
+      <summary>Four-finger touchpad swipes (up Launchpad, down desktop, left radial launcher, right previous window)</summary>
+    </key>
+    <key name="screen-time" type="b">
+      <default>true</default>
+      <summary>Count screen time per app (files in ~/.local/state/bapirlo/screentime, only on this computer)</summary>
     </key>
   </schema>
 </schemalist>

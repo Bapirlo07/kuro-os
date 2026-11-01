@@ -1,0 +1,6 @@
+[Unit]
+Description=Kuro bedtime — start / end it on schedule (bapirlo-bedtime)
+
+[Service]
+Type=oneshot
+ExecStart=%h/bapirlo-os/bin/bapirlo-bedtime tick

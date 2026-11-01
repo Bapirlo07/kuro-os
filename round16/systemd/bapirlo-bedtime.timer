@@ -1,0 +1,13 @@
+[Unit]
+Description=Kuro bedtime at bedtime, wake-up time and after login
+
+[Timer]
+# the times come from bapirlo-bedtime set (drop-in bapirlo-bedtime.timer.d/times.conf)
+OnCalendar=*-*-* 23:00:00
+OnCalendar=*-*-* 07:00:00
+OnStartupSec=20s
+Persistent=true
+Unit=bapirlo-bedtime.service
+
+[Install]
+WantedBy=timers.target
