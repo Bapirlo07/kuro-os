@@ -1,0 +1,596 @@
+#!/usr/bin/env python3
+"""Kuro OS — Guardian: keeps the desktop working when an extension crashes it.
+
+  kuro-guardian daemon        the background service (kuro-guardian.service, starts with the desktop)
+  kuro check                  check every enabled extension's code + settings before you log out
+  kuro rescue [--list | N]    put back the last known-good extensions + shell settings (works from a TTY)
+  kuro status                 what the Guardian has seen and done
+  kuro unblock UUID           turn an extension the Guardian switched off back on
+
+What the daemon does
+  · After a shell crash GNOME switches EVERY extension off (org.gnome.shell disable-user-extensions).
+    The Guardian reads that crash's stack trace in the journal, finds the extension in it, switches only
+    that one off, turns the rest back on and tells you which one it was (button: turn it back on).
+    No extension in the trace → everything back on once; a second unexplained crash within 30 min →
+    left off, notification says to run `kuro rescue`.
+  · A crash that didn't trip GNOME's protection still gets noticed: same extension twice in 24 h → off.
+  · An enabled extension that fails to load (ERROR) → notification, with "Roll back" when a known-good
+    copy of it exists.
+  · After 10 clean minutes (no crash, every enabled extension ACTIVE) it saves a known-good snapshot of
+    your Kuro extensions + all shell settings (keeps 3). That is what `kuro rescue` restores.
+Nothing leaves the machine. Log: ~/.local/state/bapirlo/guardian.log
+"""
+import ast
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "bapirlo")
+STATE = os.path.join(STATE_DIR, "guardian.json")
+LOG = os.path.join(STATE_DIR, "guardian.log")
+SNAPS = os.path.join(STATE_DIR, "guardian")
+EXT_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local/share")), "gnome-shell/extensions")
+SYS_EXT_DIR = "/usr/share/gnome-shell/extensions"
+OWN = re.compile(r"^(bapirlo|kuro)-")          # our extensions: snapshotted + rolled back
+FRAME_EXT = re.compile(r"/gnome-shell/extensions/([^/]+)/")
+KEEP_SNAPS = 3
+CLEAN_FOR = 600          # s of clean session before a snapshot
+UNEXPLAINED_WINDOW = 1800
+REPEAT_WINDOW = 86400
+
+
+# ---------------------------------------------------------------- helpers
+def log(msg):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+    if sys.stdout.isatty() or os.environ.get("INVOCATION_ID"):
+        print(line, flush=True)
+
+
+def run(*cmd, timeout=30):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE + ".new"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(tmp, STATE)
+
+
+def gget(key):
+    v = run("gsettings", "get", "org.gnome.shell", key)[1]
+    if key.endswith("extensions") and key != "disable-user-extensions":
+        return [] if not v or v.startswith("@as") else ast.literal_eval(v)
+    return v
+
+
+def gset(key, value):
+    if isinstance(value, list):
+        value = str(value)
+    return run("gsettings", "set", "org.gnome.shell", key, value)[0] == 0
+
+
+def ext_name(uuid):
+    for d in (EXT_DIR, SYS_EXT_DIR):
+        try:
+            with open(os.path.join(d, uuid, "metadata.json")) as f:
+                return json.load(f).get("name") or uuid
+        except (OSError, ValueError):
+            pass
+    return uuid
+
+
+def switch_off(uuid):
+    en = [e for e in gget("enabled-extensions") if e != uuid]
+    dis = gget("disabled-extensions")
+    if uuid not in dis:
+        dis.append(uuid)
+    gset("enabled-extensions", en)
+    gset("disabled-extensions", dis)
+
+
+def switch_on(uuid):
+    en = gget("enabled-extensions")
+    if uuid not in en:
+        en.append(uuid)
+    gset("enabled-extensions", en)
+    gset("disabled-extensions", [d for d in gget("disabled-extensions") if d != uuid])
+
+
+def notify(title, body, actions=None, on_action=None):
+    """Notification; with actions it waits in a thread and calls on_action(name)."""
+    cmd = ["notify-send", "-a", "Kuro Guardian", "-i", "security-high-symbolic", "-u", "normal", title, body]
+    if not actions:
+        run(*cmd)
+        return
+
+    def wait():
+        args = cmd[:]
+        for name, label in actions:
+            args[1:1] = ["-A", f"{name}={label}"]
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=6 * 3600).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if out and on_action:
+            on_action(out)
+    threading.Thread(target=wait, daemon=True).start()
+
+
+# ---------------------------------------------------------------- crash detection
+def shell_crashes(since):
+    """[{t, pid, culprit, reason}] for every gnome-shell that dumped core after `since` (unix s)."""
+    rc, out, _ = run("journalctl", "--user", f"--since=@{int(since)}", "-o", "json", "--all", "--no-pager",
+                     "SYSLOG_IDENTIFIER=gnome-shell", "+", "SYSLOG_IDENTIFIER=systemd-coredump", timeout=60)
+    if rc != 0 or not out:
+        return []
+    by_pid, dumped = {}, {}
+    for line in out.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        msg = e.get("MESSAGE")
+        if isinstance(msg, list):          # journald hands multi-line / odd-byte messages over as byte arrays
+            try:
+                msg = bytes(msg).decode("utf-8", "replace")
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(msg, str):
+            continue
+        t = int(e.get("__REALTIME_TIMESTAMP", "0")) / 1e6
+        if e.get("SYSLOG_IDENTIFIER") == "systemd-coredump":
+            m = re.search(r"Process (\d+) \(gnome-shell\).*dumped core", msg)
+            if m:
+                dumped[m.group(1)] = t
+            continue
+        by_pid.setdefault(e.get("_PID", "?"), []).append(msg)
+    crashes = []
+    for pid, t in sorted(dumped.items(), key=lambda kv: kv[1]):
+        msgs = "\n".join(by_pid.get(pid, [])).splitlines()
+        culprit, reason = None, ""
+        # last stack trace before the abort; its first extension frame is the culprit
+        starts = [i for i, l in enumerate(msgs) if "== Stack trace" in l]
+        if starts:
+            for l in msgs[starts[-1] + 1:]:
+                if not l.lstrip().startswith("#"):
+                    break
+                m = FRAME_EXT.search(l)
+                if m:
+                    culprit = m.group(1)
+                    break
+            for l in reversed(msgs[:starts[-1]]):
+                if l.strip() and l.strip() != "**":
+                    reason = l.strip()[:200]
+                    break
+        if not culprit:   # no JS frames: the last JS ERROR in an extension just before the end
+            for l in reversed(msgs[-80:]):
+                if "JS ERROR" in l or "Error" in l:
+                    m = FRAME_EXT.search(l)
+                    if m:
+                        culprit, reason = m.group(1), l.strip()[:200]
+                        break
+        # an installer swapped a settings schema under the running shell: the code is fine after a re-login
+        transient = bool(re.search(r"does not contain a key named|Settings schema .* is not installed", reason))
+        crashes.append({"t": t, "pid": pid, "culprit": None if transient else culprit,
+                        "reason": ("[update mid-session] " if transient else "") + reason})
+    return crashes
+
+
+def ext_states():
+    """{uuid: STATE} for the enabled extensions, from the running shell."""
+    out = {}
+    for uuid in gget("enabled-extensions"):
+        rc, info, _ = run("gnome-extensions", "info", uuid, timeout=10)
+        m = re.search(r"State:\s*(\S+)", info)
+        if m:
+            out[uuid] = m.group(1)
+        elif rc == 0 and not info:
+            out[uuid] = "MISSING"       # really not installed
+        # else: the query itself failed (shell busy / timed out) — unknown, not a problem
+    return out
+
+
+# ---------------------------------------------------------------- snapshots / rescue
+def tree_hash():
+    h = hashlib.sha1()
+    for uuid in sorted(os.listdir(EXT_DIR)) if os.path.isdir(EXT_DIR) else []:
+        if not OWN.match(uuid):
+            continue
+        for root, dirs, files in os.walk(os.path.join(EXT_DIR, uuid)):
+            dirs.sort()
+            for fn in sorted(files):
+                p = os.path.join(root, fn)
+                try:
+                    s = os.stat(p)
+                except OSError:
+                    continue
+                h.update(f"{p}:{s.st_size}:{int(s.st_mtime)}".encode())
+    h.update(run("dconf", "dump", "/org/gnome/shell/")[1].encode())
+    return h.hexdigest()
+
+
+def snapshots():
+    if not os.path.isdir(SNAPS):
+        return []
+    return sorted((d for d in os.listdir(SNAPS) if d.startswith("good-")), reverse=True)
+
+
+def take_snapshot(reason="clean session"):
+    digest = tree_hash()
+    st = load_state()
+    if st.get("snap_hash") == digest and snapshots():
+        return None
+    name = "good-" + time.strftime("%Y%m%d-%H%M%S")
+    tmp = os.path.join(SNAPS, "." + name)
+    os.makedirs(os.path.join(tmp, "extensions"), exist_ok=True)
+    for uuid in os.listdir(EXT_DIR):
+        if OWN.match(uuid):
+            shutil.copytree(os.path.join(EXT_DIR, uuid), os.path.join(tmp, "extensions", uuid), symlinks=True)
+    with open(os.path.join(tmp, "shell.dconf"), "w") as f:
+        f.write(run("dconf", "dump", "/org/gnome/shell/")[1] + "\n")
+    with open(os.path.join(tmp, "meta.json"), "w") as f:
+        json.dump({"time": time.time(), "reason": reason,
+                   "enabled": gget("enabled-extensions"),
+                   "shell": run("gnome-shell", "--version")[1]}, f, indent=1)
+    os.rename(tmp, os.path.join(SNAPS, name))
+    for old in snapshots()[KEEP_SNAPS:]:
+        shutil.rmtree(os.path.join(SNAPS, old), ignore_errors=True)
+    for prefix in ("before-rescue-", "broken-"):      # the undo copies: keep the newest 3 of each
+        olds = sorted((d for d in os.listdir(SNAPS) if d.startswith(prefix)), reverse=True)
+        for old in olds[KEEP_SNAPS:]:
+            shutil.rmtree(os.path.join(SNAPS, old), ignore_errors=True)
+    st = load_state()
+    st["snap_hash"] = digest
+    save_state(st)
+    log(f"snapshot {name} ({reason})")
+    return name
+
+
+def ensure_session_bus():
+    """From a TTY there may be no DBUS_SESSION_BUS_ADDRESS; use the running user bus if there is one."""
+    if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return True
+    bus = f"/run/user/{os.getuid()}/bus"
+    if os.path.exists(bus):
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+        return True
+    return False
+
+
+def rescue(args):
+    snaps = snapshots()
+    if not snaps:
+        print("No known-good snapshot yet (the Guardian saves one after 10 clean minutes of a session).")
+        print("Emergency fallback: all extensions back on —  gsettings set org.gnome.shell disable-user-extensions false")
+        return 1
+    if args and args[0] == "--list":
+        for i, s in enumerate(snaps, 1):
+            try:
+                with open(os.path.join(SNAPS, s, "meta.json")) as f:
+                    m = json.load(f)
+            except (OSError, ValueError):
+                m = {}
+            print(f"  {i}. {s[5:]}  {len(m.get('enabled', []))} extensions  ({m.get('reason', '')})")
+        print("kuro rescue N   restores number N (default 1 = newest)")
+        return 0
+    n = int(args[0]) if args and args[0].isdigit() else 1
+    if not 1 <= n <= len(snaps):
+        print(f"No snapshot {n} (there are {len(snaps)}).")
+        return 1
+    snap = os.path.join(SNAPS, snaps[n - 1])
+    if not ensure_session_bus():
+        if not os.environ.get("KURO_RESCUE_INNER"):
+            os.environ["KURO_RESCUE_INNER"] = "1"
+            os.execvp("dbus-run-session", ["dbus-run-session", "--", sys.argv[0], "rescue", str(n)])
+    # keep what is there now, so a rescue can itself be undone
+    undo = os.path.join(STATE_DIR, "guardian", "before-rescue-" + time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(os.path.join(undo, "extensions"), exist_ok=True)
+    for uuid in os.listdir(EXT_DIR):
+        if OWN.match(uuid):
+            shutil.move(os.path.join(EXT_DIR, uuid), os.path.join(undo, "extensions", uuid))
+    with open(os.path.join(undo, "shell.dconf"), "w") as f:
+        f.write(run("dconf", "dump", "/org/gnome/shell/")[1] + "\n")
+    for uuid in os.listdir(os.path.join(snap, "extensions")):
+        shutil.copytree(os.path.join(snap, "extensions", uuid), os.path.join(EXT_DIR, uuid), symlinks=True)
+    with open(os.path.join(snap, "shell.dconf")) as f:
+        subprocess.run(["dconf", "load", "/org/gnome/shell/"], stdin=f, check=False)
+    gset("disable-user-extensions", "false")
+    st = load_state()
+    st["blocked"] = {}
+    save_state(st)
+    log(f"rescue: restored {snaps[n - 1]} (previous state kept in {undo})")
+    print(f"Restored the known-good setup from {snaps[n - 1][5:]}.")
+    print(f"What was there before is kept in {undo}")
+    print("Log out and back in (or reboot) to load it.")
+    return 0
+
+
+def rollback_one(uuid):
+    for s in snapshots():
+        src = os.path.join(SNAPS, s, "extensions", uuid)
+        if os.path.isdir(src):
+            dst = os.path.join(EXT_DIR, uuid)
+            keep = os.path.join(STATE_DIR, "guardian", f"broken-{uuid}-" + time.strftime("%Y%m%d-%H%M%S"))
+            if os.path.isdir(dst):
+                shutil.move(dst, keep)
+            shutil.copytree(src, dst, symlinks=True)
+            log(f"rolled back {uuid} to {s} (broken copy in {keep})")
+            notify("Rolled back " + ext_name(uuid), "The known-good copy is in place — log out and back in to load it.")
+            return True
+    return False
+
+
+# ---------------------------------------------------------------- check
+def check(quiet=False):
+    """Syntax + metadata + schema check of every enabled user extension. Returns a list of problems."""
+    shell_major = re.search(r"(\d+)", run("gnome-shell", "--version")[1] or "0").group(1)
+    problems = []
+    enabled = gget("enabled-extensions")
+    for uuid in enabled:
+        d = os.path.join(EXT_DIR, uuid)
+        if not os.path.isdir(d):
+            if not os.path.isdir(os.path.join(SYS_EXT_DIR, uuid)):
+                problems.append((uuid, "enabled but not installed"))
+            continue
+        try:
+            with open(os.path.join(d, "metadata.json")) as f:
+                meta = json.load(f)
+            if shell_major not in [str(v).split(".")[0] for v in meta.get("shell-version", [])]:
+                problems.append((uuid, f"metadata doesn't list GNOME {shell_major}"))
+        except (OSError, ValueError) as e:
+            problems.append((uuid, f"metadata.json unreadable: {e}"))
+        if not OWN.match(uuid):
+            continue    # third-party code is checked by its author; ours gets the full check
+        for root, dirs, files in os.walk(d):
+            dirs[:] = [x for x in dirs if x not in ("node_modules", ".git")]
+            for fn in files:
+                if fn.endswith(".js"):
+                    rc, _, err = run("node", "--check", os.path.join(root, fn))
+                    if rc != 0:
+                        first = next((l for l in err.splitlines() if "Error" in l), err[:160])
+                        problems.append((uuid, f"{os.path.relpath(os.path.join(root, fn), d)}: {first}"))
+        sd = os.path.join(d, "schemas")
+        xml = [x for x in os.listdir(sd)] if os.path.isdir(sd) else []
+        xml = [x for x in xml if x.endswith(".gschema.xml")]
+        if xml:
+            with tempfile.TemporaryDirectory() as tmp:
+                for x in xml:
+                    shutil.copy(os.path.join(sd, x), tmp)
+                rc, _, err = run("glib-compile-schemas", "--strict", tmp)
+                if rc != 0:
+                    problems.append((uuid, "schema: " + err.splitlines()[0] if err else "schema doesn't compile"))
+            if not os.path.exists(os.path.join(sd, "gschemas.compiled")):
+                problems.append((uuid, "schemas not compiled"))
+    if not quiet:
+        own = [u for u in enabled if OWN.match(u)]
+        if problems:
+            print(f"✗ {len(problems)} problem(s):")
+            for u, p in problems:
+                print(f"  {ext_name(u)} ({u}): {p}")
+        else:
+            print(f"✓ all {len(enabled)} enabled extensions look fine "
+                  f"({len(own)} Kuro ones fully checked: code, metadata, settings schema)")
+    return problems
+
+
+# ---------------------------------------------------------------- daemon
+class Guardian:
+    def __init__(self):
+        self.st = load_state()
+        self.st.setdefault("crashes", [])
+        self.st.setdefault("blocked", {})
+        self.st.setdefault("last_scan", time.time())
+        self.clean_since = time.time()
+        self.warned_error = set()
+
+    def save(self):
+        save_state(self.st)
+
+    def scan(self):
+        new = shell_crashes(self.st["last_scan"])
+        self.st["last_scan"] = time.time()
+        seen = {(c["pid"], int(c["t"])) for c in self.st["crashes"]}
+        new = [c for c in new if (c["pid"], int(c["t"])) not in seen]
+        cutoff = time.time() - 7 * 86400
+        self.st["crashes"] = [c for c in self.st["crashes"] if c["t"] > cutoff] + new
+        self.save()
+        for c in new:
+            log(f"shell crash pid {c['pid']} at {time.strftime('%H:%M:%S', time.localtime(c['t']))}: "
+                f"culprit={c['culprit'] or 'unknown'} {c['reason']}")
+        return new
+
+    def block(self, uuid, why):
+        switch_off(uuid)
+        self.st["blocked"][uuid] = {"t": time.time(), "why": why}
+        self.save()
+        log(f"switched off {uuid}: {why}")
+
+    def on_action(self, uuid):
+        def act(name):
+            if name == "undo":
+                switch_on(uuid)
+                self.st["blocked"].pop(uuid, None)
+                self.save()
+                log(f"user turned {uuid} back on")
+                notify(ext_name(uuid) + " is back on", "It loads straight away. If it crashes again, I'll switch it off again.")
+            elif name == "rollback":
+                rollback_one(uuid)
+        return act
+
+    def handle(self, new):
+        master_off = gget("disable-user-extensions") == "true"
+        recent = [c for c in self.st["crashes"] if c["t"] > time.time() - 3600 and not c.get("handled")]
+        if master_off:
+            if not recent:
+                if not self.st.get("told_manual"):
+                    log("extensions are switched off but no new shell crash — you did that, leaving it")
+                    self.st["told_manual"] = True
+                    self.save()
+                return
+            self.st["told_manual"] = False
+            for c in recent:          # each crash gets acted on once, so a later manual switch-off is respected
+                c["handled"] = True
+            self.save()
+            last = recent[-1]
+            culprit = last["culprit"]
+            if culprit:
+                self.block(culprit, last["reason"] or "crashed the shell")
+                gset("disable-user-extensions", "false")
+                name = ext_name(culprit)
+                log(f"recovered: everything back on except {culprit}")
+                notify(f"{name} crashed the desktop",
+                       f"Kuro Guardian switched off just {name} and turned everything else back on.",
+                       actions=[("undo", "Turn it back on")], on_action=self.on_action(culprit))
+                return
+            prev = self.st.get("unexplained_at", 0)
+            if time.time() - prev < UNEXPLAINED_WINDOW:
+                log("second unexplained crash within 30 min — leaving extensions off")
+                notify("The desktop crashed again",
+                       "I couldn't tell which extension did it, so extensions stay off for now. "
+                       "Run  kuro rescue  in a terminal to put back the last known-good setup.")
+                return
+            self.st["unexplained_at"] = time.time()
+            self.save()
+            gset("disable-user-extensions", "false")
+            log("recovered: unexplained crash, everything back on (once)")
+            notify("The desktop crashed — fixed",
+                   "No single extension was to blame, so I turned everything back on. "
+                   "If it happens again soon, I'll leave them off and tell you.")
+            return
+        # protection didn't trip: count repeats
+        for c in new:
+            u = c["culprit"]
+            if not u or u not in gget("enabled-extensions"):
+                continue
+            n = sum(1 for x in self.st["crashes"] if x["culprit"] == u and x["t"] > time.time() - REPEAT_WINDOW)
+            name = ext_name(u)
+            if n >= 2:
+                self.block(u, f"crashed the shell {n}× in 24 h")
+                notify(f"{name} keeps crashing the desktop",
+                       f"It crashed the desktop {n} times today, so Kuro Guardian switched it off.",
+                       actions=[("undo", "Turn it back on")], on_action=self.on_action(u))
+            else:
+                notify(f"{name} crashed your last session",
+                       "Everything is running again. If it happens again today, I'll switch it off.")
+
+    def check_errors(self):
+        now_bad = {u: s for u, s in ext_states().items() if s in ("ERROR", "OUT OF DATE", "OUT_OF_DATE", "MISSING")}
+        # only what was bad on two checks in a row (a minute apart) — one odd answer is not a broken extension
+        bad = {u: s for u, s in now_bad.items() if u in getattr(self, "_bad_before", {})}
+        self._bad_before = now_bad
+        for u, s in bad.items():
+            if u in self.warned_error:
+                continue
+            self.warned_error.add(u)
+            log(f"{u} is {s}")
+            has_good = any(os.path.isdir(os.path.join(SNAPS, x, "extensions", u)) for x in snapshots())
+            notify(f"{ext_name(u)} didn't load", f"Its state is {s}. Everything else is running.",
+                   actions=[("rollback", "Roll back")] if has_good and OWN.match(u) else None,
+                   on_action=self.on_action(u))
+        return bad
+
+    def tick(self):
+        new = self.scan()
+        if new or gget("disable-user-extensions") == "true":
+            self.handle(new)
+            self.clean_since = time.time()
+        bad = self.check_errors()
+        if new or bad or gget("disable-user-extensions") == "true":
+            self.clean_since = time.time()
+        elif time.time() - self.clean_since >= CLEAN_FOR:
+            if not check(quiet=True):
+                take_snapshot()
+            self.clean_since = time.time() - CLEAN_FOR + 1800   # next look in 30 min
+
+    def run(self):
+        log("guardian started")
+        time.sleep(15)       # let the shell finish loading extensions
+        # watch the master switch live
+        mon = subprocess.Popen(["gsettings", "monitor", "org.gnome.shell", "disable-user-extensions"],
+                               stdout=subprocess.PIPE, text=True)
+        wake = threading.Event()
+
+        def watch():
+            for line in mon.stdout:
+                if "true" in line:
+                    time.sleep(3)
+                    wake.set()
+        threading.Thread(target=watch, daemon=True).start()
+        while True:
+            try:
+                self.tick()
+            except Exception as e:    # never let the guard itself die
+                log(f"tick error: {e!r}")
+            wake.wait(60)
+            wake.clear()
+
+
+def status():
+    st = load_state()
+    print("Kuro Guardian —", "running" if run("systemctl", "--user", "is-active", "kuro-guardian")[1] == "active" else "NOT running")
+    print("  extensions master switch:", "OFF (crash protection?)" if gget("disable-user-extensions") == "true" else "on")
+    bl = st.get("blocked", {})
+    print(f"  switched off by me: {', '.join(f'{ext_name(u)} ({u})' for u in bl) or 'none'}")
+    cr = st.get("crashes", [])
+    print(f"  shell crashes seen (7 days): {len(cr)}")
+    for c in cr[-5:]:
+        print(f"    {time.strftime('%a %H:%M', time.localtime(c['t']))}  {c['culprit'] or 'unknown'}  {c['reason'][:90]}")
+    s = snapshots()
+    print(f"  known-good snapshots: {len(s)}" + (f" (newest {s[0][5:]})" if s else ""))
+    print(f"  log: {LOG}")
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "status"
+    if cmd == "daemon":
+        Guardian().run()
+    elif cmd == "check":
+        return 1 if check() else 0
+    elif cmd == "rescue":
+        return rescue(a[1:])
+    elif cmd == "snapshot":
+        n = take_snapshot("by hand")
+        print(f"saved {n}" if n else "nothing changed since the last snapshot")
+    elif cmd == "unblock" and len(a) > 1:
+        switch_on(a[1])
+        st = load_state()
+        st.get("blocked", {}).pop(a[1], None)
+        save_state(st)
+        print(f"{ext_name(a[1])} is back on.")
+    elif cmd == "status":
+        return status()
+    else:
+        print(__doc__)
+        return 0 if cmd in ("-h", "--help", "help") else 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

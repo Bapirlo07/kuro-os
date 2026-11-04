@@ -1,0 +1,9 @@
+{
+  "uuid": "bapirlo-study@bapirlo-os",
+  "name": "Kuro Study",
+  "description": "Kuro OS: your Lectern studies in the top bar — next class, cards due, nearest deadline, today's plan; focus blocks that count for a module in Lectern; Super+Shift+X turns selected text into a flashcard.",
+  "shell-version": ["50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-study",
+  "version": 1,
+  "url": "https://github.com/Bapirlo07/kuro-os"
+}

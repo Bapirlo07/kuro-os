@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-study" path="/org/gnome/shell/extensions/bapirlo-study/">
+    <key name="card-new" type="as">
+      <default><![CDATA[['<Shift><Super>x']]]></default>
+      <summary>Kuro Study: turn the selected text into a Lectern flashcard</summary>
+    </key>
+    <key name="last-module" type="s">
+      <default>''</default>
+      <summary>Module the last card / focus block was for</summary>
+    </key>
+    <key name="focus-lock" type="b">
+      <default>true</default>
+      <summary>Focus Lock: block every app except the allowed ones while a focus block runs</summary>
+    </key>
+    <key name="focus-allowed" type="as">
+      <default>['lectern.desktop', 'google-chrome.desktop', 'com.google.Chrome.desktop']</default>
+      <summary>Apps (.desktop ids) that stay usable during a focus block</summary>
+    </key>
+  </schema>
+</schemalist>

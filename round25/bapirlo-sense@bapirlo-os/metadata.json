@@ -1,0 +1,8 @@
+{
+  "uuid": "bapirlo-sense@bapirlo-os",
+  "name": "Kuro Sense",
+  "description": "Kuro OS round 25: head-tracked 3D wallpaper, look-away pause/dim, Liquid Glass bar + dock, music-reactive glow, spatial UI sounds and \"Hey Kuro\" offline voice commands.",
+  "shell-version": ["50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.bapirlo-sense",
+  "version": 1
+}

@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Kuro OS — update safety check (run by bapirlo-update before `paru -Syu`; also `kuro preflight`).
+
+A GNOME major upgrade (51 → 52) is the one update that can break this whole desktop: every extension that
+doesn't list the new version is switched off at the next login. Before anything is installed this:
+  · lists what's coming (official repos via checkupdates — no root, a private copy of the database — + AUR)
+  · on a GNOME major bump: asks extensions.gnome.org whether each of your downloaded extensions already
+    has a build for the new GNOME, and flags the Kuro ones (ours — they need a test on the new version)
+  · on a kernel upgrade: notes the DKMS modules that will rebuild (msi-ec = fan / battery controls)
+Exit 0 = go ahead · 10 = hold GNOME back (bapirlo-update then runs paru with --ignore for the GNOME core)
+· 1 = stop. `--report` only prints, never asks.   KURO_PREFLIGHT_FAKE="pkg old -> new;..." to test.
+Afterwards `kuro-preflight --after` checks the result (DKMS built for the new kernel, `kuro check`).
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+HOME = os.path.expanduser("~")
+EXT_DIR = os.path.join(HOME, ".local/share/gnome-shell/extensions")
+SYS_EXT_DIR = "/usr/share/gnome-shell/extensions"
+OWN = re.compile(r"^(bapirlo|kuro)-")
+GNOME_CORE = ["gnome-shell", "mutter", "gnome-session", "gnome-settings-daemon", "gnome-control-center",
+              "gdm", "gjs", "gnome-shell-extensions"]
+R, D, G, Y, B, N = "\033[38;2;255;70;85m", "\033[38;2;202;181;191m", "\033[32m", "\033[33m", "\033[1m", "\033[0m"
+
+
+def run(*cmd, timeout=120):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+
+
+def pending():
+    fake = os.environ.get("KURO_PREFLIGHT_FAKE")
+    lines = fake.split(";") if fake else (run("checkupdates")[1].splitlines() + run("paru", "-Qua")[1].splitlines())
+    out = {}
+    for l in lines:
+        m = re.match(r"\s*(\S+)\s+(\S+)\s+->\s+(\S+)", l)
+        if m:
+            out[m.group(1)] = (m.group(2), m.group(3))
+    return out
+
+
+def major(v):
+    m = re.match(r"(?:\d+:)?(\d+)", v)
+    return int(m.group(1)) if m else 0
+
+
+def enabled():
+    v = run("gsettings", "get", "org.gnome.shell", "enabled-extensions")[1].strip()
+    if not v or v.startswith("@as"):
+        return []
+    import ast
+    return ast.literal_eval(v)
+
+
+def ego_has(uuid, shell):
+    url = f"https://extensions.gnome.org/extension-info/?uuid={uuid}&shell_version={shell}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            info = json.loads(r.read().decode())
+        # (the API falls back to the newest build for ANY version asked — only the map says what's really there)
+        return str(shell) in (info.get("shell_version_map") or {}), info.get("name") or uuid
+    except Exception as e:
+        code = getattr(e, "code", None)
+        return (False if code == 404 else None), uuid
+
+
+def name_of(uuid):
+    for d in (EXT_DIR, SYS_EXT_DIR):
+        try:
+            with open(os.path.join(d, uuid, "metadata.json")) as f:
+                return json.load(f).get("name") or uuid
+        except (OSError, ValueError):
+            pass
+    return uuid
+
+
+def owner(path):
+    rc, out = run("pacman", "-Qoq", path, timeout=10)
+    return out.strip() if rc == 0 else None
+
+
+def check_gnome(new_major):
+    """[(uuid, name, verdict, ok)] for every enabled extension against GNOME new_major."""
+    rows = []
+    for uuid in enabled():
+        user = os.path.isdir(os.path.join(EXT_DIR, uuid))
+        name = name_of(uuid)
+        if not user:
+            pkg = owner(os.path.join(SYS_EXT_DIR, uuid))
+            rows.append((uuid, name, f"system package {pkg or '?'} — updates together with GNOME", True))
+            continue
+        if OWN.match(uuid):
+            rows.append((uuid, name, "kuro", False))
+            continue
+        has, _ = ego_has(uuid, new_major)
+        if has is None:
+            rows.append((uuid, name, "couldn't reach extensions.gnome.org", False))
+        elif has:
+            rows.append((uuid, name, f"has a GNOME {new_major} version", True))
+        else:
+            rows.append((uuid, name, f"NO GNOME {new_major} version yet — would be switched off", False))
+    return rows
+
+
+def after():
+    """Post-update: DKMS modules built for every installed kernel, extensions still fine."""
+    problems = []
+    rc, st = run("dkms", "status")
+    kernels = sorted(os.listdir("/usr/lib/modules")) if os.path.isdir("/usr/lib/modules") else []
+    kernels = [k for k in kernels if os.path.exists(f"/usr/lib/modules/{k}/modules.dep")]
+    mods = sorted({l.split(",")[0].strip() for l in st.splitlines() if "," in l})
+    for k in kernels:
+        for m in mods:
+            if not re.search(rf"^{re.escape(m)}, {re.escape(k)},.*installed", st, re.M):
+                problems.append(f"DKMS module {m.split('/')[0]} isn't built for kernel {k}"
+                                + (" — fan / battery controls won't work on it" if m.startswith("msi-ec") else ""))
+    rc, out = run(os.path.join(os.path.dirname(os.path.abspath(__file__)), "kuro-guardian"), "check")
+    if rc != 0:
+        problems.append("extension check: " + " · ".join(l.strip() for l in out.splitlines()[1:4]))
+    if problems:
+        print(f"\n  {B}{Y}After the update:{N}")
+        for p in problems:
+            print(f"   {Y}!{N} {p}")
+    else:
+        print(f"\n  {G}✓ After the update: kernel modules built, all extensions fine.{N}")
+    return 1 if problems else 0
+
+
+def main():
+    a = sys.argv[1:]
+    if "--after" in a:
+        return after()
+    report = "--report" in a
+    pk = pending()
+    if not pk:
+        print(f"  {D}Safety check: nothing to update.{N}")
+        return 0
+    print(f"  {B}Safety check{N} {D}— {len(pk)} package(s) to update{N}")
+    hold = False
+    worry = False
+    shell_now = run("gnome-shell", "--version")[1]
+    cur = major(re.search(r"(\d+)", shell_now).group(1)) if re.search(r"(\d+)", shell_now) else 0
+    if "gnome-shell" in pk and major(pk["gnome-shell"][1]) > cur:
+        new = major(pk["gnome-shell"][1])
+        print(f"\n  {R}{B}GNOME {cur} → {new}{N} {D}(big upgrade){N} — checking your {len(enabled())} extensions…")
+        rows = check_gnome(new)
+        bad = [r for r in rows if not r[3]]
+        kuro = [r for r in bad if r[2] == "kuro"]
+        for uuid, name, verdict, ok in rows:
+            if not ok and verdict != "kuro":
+                print(f"   {R}✗{N} {name}: {D}{verdict}{N}")
+        if kuro:
+            print(f"   {R}✗{N} {len(kuro)} Kuro extensions: {D}ours — they list GNOME {cur} only, so they need a test "
+                  f"on {new} (ask Claude to port them) before switching back on{N}")
+        print(f"   {G}✓{N} {D}{len(rows) - len(bad)} fine (packaged with GNOME, or already have a GNOME {new} build){N}")
+        if bad:
+            worry = True
+            print(f"\n  {B}{len(bad)} extension(s) would stop working after this.{N} "
+                  f"{D}Holding GNOME back keeps today's desktop and still updates everything else.{N}")
+    kernels = [p for p in pk if re.match(r"^linux(-cachyos)?(-lts)?$", p)]
+    if kernels:
+        rc, st = run("dkms", "status")
+        mods = sorted({l.split("/")[0] for l in st.splitlines() if "/" in l})
+        if mods:
+            print(f"\n  {D}Kernel update ({', '.join(kernels)}): {', '.join(mods)} will be rebuilt — "
+                  f"checked again after the update.{N}")
+    if report or not worry:
+        if not worry:
+            print(f"  {G}✓ Nothing here should break Kuro OS.{N}")
+        return 0
+    try:
+        ans = input(f"\n  {B}[H]{N}old GNOME back (recommended) · {B}[c]{N}ontinue anyway · {B}[q]{N}uit: ").strip().lower()
+    except EOFError:
+        ans = "h"
+    if ans.startswith("q"):
+        return 1
+    if ans.startswith("c"):
+        return 0
+    return 10
+
+
+if __name__ == "__main__":
+    sys.exit(main())

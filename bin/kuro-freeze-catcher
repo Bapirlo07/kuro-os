@@ -1,0 +1,54 @@
+#!/bin/bash
+# Kuro OS — Freeze Catcher (GNOME only).
+# Watches GNOME Shell for the first 3 minutes after login. If it stops answering D-Bus for ~10 s
+# (a frozen desktop), it:
+#   1. saves what every shell thread is doing to ~/.local/state/bapirlo/freeze/<time>.txt
+#   2. sends SIGABRT, so GNOME Shell prints its JavaScript stack trace to the journal and dumps core
+# The session then ends and you're back at the login screen instead of a hard reboot. Kuro Guardian
+# reads that stack trace at the next login and switches off only the extension that caused the freeze.
+set -u
+case "${XDG_CURRENT_DESKTOP:-}" in *GNOME*) ;; *) exit 0 ;; esac
+
+OUT="$HOME/.local/state/bapirlo/freeze"
+mkdir -p "$OUT"
+WATCH=${KURO_FREEZE_WATCH:-180}     # seconds after login to watch
+LIMIT=${KURO_FREEZE_LIMIT:-3}       # failed pings in a row (each up to 3 s + 1 s gap) = frozen
+
+shell_pid() { pgrep -u "$UID" -x gnome-shell -n; }
+ping_shell() {
+  timeout 3 gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1
+}
+threads() {
+  for t in /proc/"$1"/task/*; do
+    st=$(sed 's/.*) //' "$t/stat" 2>/dev/null)   # fields after "(comm)": state is 1st, utime 12th
+    printf '%-8s %-18s state=%s wchan=%-28s utime=%s\n' "${t##*/}" "$(cat "$t/comm" 2>/dev/null)" \
+      "$(cut -d' ' -f1 <<<"$st")" "$(cat "$t/wchan" 2>/dev/null)" "$(cut -d' ' -f12 <<<"$st")"
+  done
+}
+
+for _ in $(seq 30); do PID=$(shell_pid) && break; sleep 1; done
+[ -n "${PID:-}" ] || exit 0
+
+fails=0; start=$SECONDS
+while (( SECONDS - start < WATCH )); do
+  sleep 1
+  kill -0 "$PID" 2>/dev/null || exit 0
+  if ping_shell; then fails=0; continue; fi
+  (( ++fails < LIMIT )) && continue
+
+  f="$OUT/$(date +%F_%H-%M-%S).txt"
+  {
+    echo "GNOME Shell pid $PID froze $((SECONDS - start)) s after login ($(date))"
+    echo "== threads, sample 1"; threads "$PID"
+    sleep 2
+    echo "== threads, sample 2 (utime going up = spinning, not = waiting)"; threads "$PID"
+    echo "== children"; ps --ppid "$PID" -o pid,stat,etime,args 2>/dev/null
+    echo "== last shell log"; journalctl --user -b --since "-3min" --no-pager -o short-iso _PID="$PID" | tail -60
+  } > "$f" 2>&1
+  logger -t kuro-freeze-catcher "GNOME Shell froze; details in $f; sending SIGABRT for a stack trace"
+  kill -ABRT "$PID"
+  sleep 8
+  kill -0 "$PID" 2>/dev/null && kill -KILL "$PID"
+  exit 0
+done

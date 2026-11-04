@@ -33,6 +33,30 @@ def read(path):
         return {}
 
 
+LIGHT_DIR = os.path.join(HOME, ".cache", "bapirlo", "hypr-wall")
+
+
+def light_copy(path):
+    """Screen-sized 30 fps copy of a video wallpaper (4K60 decode + scaling on the
+    iGPU made the whole session lag). Built once in the background at idle
+    priority; the original plays until it's ready."""
+    base = os.path.splitext(os.path.basename(path))[0]
+    out = os.path.join(LIGHT_DIR, base + "-1600p30.mp4")
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(path):
+        return out
+    os.makedirs(LIGHT_DIR, exist_ok=True)
+    tmp = out + ".part.mp4"
+    if not os.path.exists(tmp):
+        cmd = ("nice -n 19 ionice -c3 ffmpeg -y -loglevel error -i \"$1\" -an "
+               "-vf 'scale=2560:1600:force_original_aspect_ratio=increase,crop=2560:1600,fps=30' "
+               "-c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -movflags +faststart \"$2\" "
+               "&& mv \"$2\" \"$3\" && kill -HUP \"$4\"; rm -f \"$2\"")
+        subprocess.Popen(["sh", "-c", cmd, "sh", path, tmp, out, str(os.getpid())],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    return path
+
+
 def wanted():
     """(file, is_video) to show now."""
     conf, state = read(CONF), read(STATE)
@@ -86,6 +110,7 @@ class Daemon:
             opts = "no-audio panscan=1.0 hwdec=vaapi"
             if video:
                 opts += " loop-file=inf"
+                path = light_copy(path)
             else:
                 opts += " image-display-duration=inf"
             # -p: pause while the wallpaper is fully hidden behind windows
@@ -108,7 +133,7 @@ class Daemon:
     def run(self):
         for s in (signal.SIGTERM, signal.SIGINT):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, s, self.quit)
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, lambda: (self.queue(), True)[1])
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, lambda: (setattr(self, "shown", None), self.queue(), True)[2])
         self.sync()
         GLib.timeout_add_seconds(5, self.watchdog)
         self.loop.run()

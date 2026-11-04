@@ -1,0 +1,14 @@
+[Unit]
+Description=Kuro Power — tells you which app keeps the NVIDIA GPU awake or burns CPU on battery
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/bapirlo-os/bin/kuro-power daemon
+Restart=on-failure
+RestartSec=30
+Nice=15
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=graphical-session.target

@@ -5,13 +5,16 @@
 //   · running apps (by .desktop id) and how many windows each has
 //   · terminal folders (written by the fish hook ~/.config/fish/conf.d/bapirlo-session.fish)
 //   · open Files (Nautilus) folders
-// At login it relaunches them, one every 0.5 s. Window places come back via Smart Auto Move NG;
-// tabs / documents come back from each app's own restore (Chrome "continue where you left off"…).
+//   · every window's workspace, monitor, position, size, maximised / minimised state
+// At login it relaunches them, one every 0.5 s, and for the first minute puts each window that appears
+// back where it was (matched by app, then by title, then in order). Tabs / documents come back from each
+// app's own restore (Chrome "continue where you left off", VS Code, Lectern…).
 // Nothing is saved while logging out, so apps closing during logout can't wipe the list.
 //
 // Settings: ~/.config/bapirlo/session.json  {"restore": true, "exclude": ["app.desktop", …]}
 // Off switch: gnome-extensions disable bapirlo-session@bapirlo-os
 import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 
@@ -26,7 +29,9 @@ const CONFIG_FILE = GLib.build_filenamev([GLib.get_user_config_dir(), 'bapirlo',
 
 const SAVE_EVERY_S = 30;
 const LAUNCH_GAP_MS = 500;
-const SETTLE_AFTER_RESTORE_S = 45;      // don't save a half-relaunched session
+const SETTLE_AFTER_RESTORE_S = 75;      // don't save a half-relaunched / half-placed session
+const PLACE_FOR_S = 60;                 // how long after login new windows are put back in place
+const MAX_WORKSPACES = 12;
 const MAX_AGE_DAYS = 30;
 const NAUTILUS = 'org.gnome.Nautilus.desktop';
 // never relaunched: settings / tools / things that should only open on purpose
@@ -65,6 +70,21 @@ function listDir(path) {
 function isTerminal(app) {
     const cats = app.get_app_info()?.get_categories() ?? '';
     return cats.split(';').includes('TerminalEmulator');
+}
+
+// GNOME 49+ dropped the flags argument (and get_maximized)
+function maximize(w) {
+    if (w.get_maximized)
+        w.maximize(Meta.MaximizeFlags.BOTH);
+    else
+        w.maximize();
+}
+
+function unmaximize(w) {
+    if (w.get_maximized)
+        w.unmaximize(Meta.MaximizeFlags.BOTH);
+    else
+        w.unmaximize();
 }
 
 export default class BapirloSessionExtension extends Extension {
@@ -167,7 +187,7 @@ export default class BapirloSessionExtension extends Extension {
                 const terminal = isTerminal(app);
                 if (terminal)
                     terminals += windows;
-                apps.push({id, windows, terminal});
+                apps.push({id, windows, terminal, wins: this._windowPlaces(app)});
             }
             const shells = this._shellDirs().slice(0, terminals);
             const running = new Set(apps.map(a => a.id));
@@ -180,6 +200,25 @@ export default class BapirloSessionExtension extends Extension {
         } finally {
             this._saving = false;
         }
+    }
+
+    _windowPlaces(app) {
+        const display = global.display;
+        return app.get_windows()
+            .filter(w => !w.skip_taskbar && w.get_window_type() === Meta.WindowType.NORMAL &&
+                !/picture.in.picture/i.test(w.get_title() ?? ''))
+            .sort((a, b) => a.get_stable_sequence() - b.get_stable_sequence())
+            .map(w => {
+                const r = w.get_frame_rect();
+                const mon = Math.max(0, w.get_monitor());
+                const g = display.get_monitor_geometry(mon);
+                return {
+                    ws: w.is_on_all_workspaces() ? -1 : (w.get_workspace()?.index() ?? 0),
+                    mon, rx: r.x - g.x, ry: r.y - g.y, w: r.width, h: r.height,
+                    max: !!(w.maximizedHorizontally && w.maximizedVertically),
+                    min: !!w.minimized, title: w.get_title() ?? '',
+                };
+            });
     }
 
     // live fish shells write their folder to shells/<pid>; newest first
@@ -233,6 +272,8 @@ export default class BapirloSessionExtension extends Extension {
             return;
         }
 
+        this._startPlacing(state);
+
         // hand the saved terminal folders to the fish shells that are about to start
         GLib.mkdir_with_parents(PENDING_DIR, 0o700);
         for (const name of listDir(PENDING_DIR))
@@ -275,7 +316,139 @@ export default class BapirloSessionExtension extends Extension {
         this._launchId = GLib.timeout_add(GLib.PRIORITY_LOW, LAUNCH_GAP_MS, next);
     }
 
+    // ------------------------------------------------------------------ window places
+    _startPlacing(state) {
+        this._pending = new Map();
+        for (const a of state.apps ?? []) {
+            if (a.wins?.length && !this._excluded(a.id))
+                this._pending.set(a.id, a.wins.map(x => ({...x})));
+        }
+        if (!this._pending.size)
+            return;
+        this._tracker = Shell.WindowTracker.get_default();
+        this._sources = new Set();
+        global.display.connectObject('window-created', (_d, win) => this._watch(win, false), this);
+        for (const actor of global.get_window_actors())
+            this._watch(actor.meta_window, true);
+        this._placeEndId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, PLACE_FOR_S, () => {
+            this._placeEndId = 0;
+            this._stopPlacing();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _stopPlacing() {
+        global.display.disconnectObject(this);
+        for (const id of this._sources ?? [])
+            GLib.source_remove(id);
+        this._sources = null;
+        this._pending = null;
+    }
+
+    _later(ms, fn) {
+        if (!this._sources)
+            return;
+        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            this._sources?.delete(id);
+            fn();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._sources.add(id);
+    }
+
+    _watch(win, existing) {
+        if (!win || win.get_window_type() !== Meta.WindowType.NORMAL)
+            return;
+        if (existing) {
+            this._place(win);
+            return;
+        }
+        // poll until the window is mapped and its app is known (first-frame often fires before we can
+        // connect to it), then place it — and once more shortly after, in case the app or Wayland's
+        // initial placement moves it again
+        let tries = 0;
+        const attempt = () => {
+            if (!win.get_compositor_private())
+                return;                                     // gone
+            const ready = win.get_frame_rect().width > 0 && this._tracker.get_window_app(win);
+            if (!ready) {
+                if (++tries < 40)
+                    this._later(200, attempt);
+                return;
+            }
+            const s = this._place(win);
+            if (s)
+                this._later(700, () => win.get_compositor_private() && this._applySafe(win, s));
+        };
+        this._later(200, attempt);
+    }
+
+    _place(win) {
+        if (!this._pending || !win.get_compositor_private() || win.skip_taskbar)
+            return null;
+        const title = win.get_title() ?? '';
+        if (/picture.in.picture/i.test(title))
+            return null;
+        const id = this._tracker.get_window_app(win)?.get_id();
+        const list = this._pending.get(id);
+        if (!list?.length)
+            return null;
+        let i = list.findIndex(s => s.title && s.title === title);
+        if (i < 0)
+            i = 0;
+        const s = list.splice(i, 1)[0];
+        if (!list.length)
+            this._pending.delete(id);
+        this._applySafe(win, s);
+        return s;
+    }
+
+    _applySafe(win, s) {
+        try {
+            this._apply(win, s);
+        } catch (e) {
+            console.warn(`bapirlo-session: placing a window failed: ${e.message}`);
+        }
+    }
+
+    _apply(win, s) {
+        const display = global.display, wm = global.workspace_manager;
+        if (s.ws === -1) {
+            win.stick();
+        } else if (s.ws >= 0 && s.ws < MAX_WORKSPACES) {
+            while (wm.n_workspaces <= s.ws)
+                wm.append_new_workspace(false, global.get_current_time());
+            win.change_workspace_by_index(s.ws, false);
+        }
+        const mon = s.mon < display.get_n_monitors() ? s.mon : display.get_primary_monitor();
+        const ismax = win.maximizedHorizontally || win.maximizedVertically;
+        if (s.max) {
+            if (win.get_monitor() !== mon) {
+                if (ismax)
+                    unmaximize(win);
+                win.move_to_monitor(mon);
+            }
+            maximize(win);
+        } else {
+            if (ismax)
+                unmaximize(win);
+            const wa = win.get_work_area_for_monitor(mon);
+            const g = display.get_monitor_geometry(mon);
+            const w = Math.min(s.w, wa.width), h = Math.min(s.h, wa.height);
+            const x = Math.max(wa.x, Math.min(g.x + s.rx, wa.x + wa.width - w));
+            const y = Math.max(wa.y, Math.min(g.y + s.ry, wa.y + wa.height - h));
+            win.move_resize_frame(true, x, y, w, h);
+        }
+        if (s.min)
+            win.minimize();
+    }
+
     disable() {
+        this._stopPlacing();
+        for (const id of [this._placeEndId])
+            if (id)
+                GLib.source_remove(id);
+        this._placeEndId = 0;
         // disabled while still logged in → keep the latest state on disk
         if (!this._frozen && Main.sessionMode.currentMode === 'user' && this._tickId)
             this._save();

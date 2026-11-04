@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Kuro Sense (round 25) — switches and tests.
+#   bapirlo-sense status
+#   bapirlo-sense head on|off       3D wallpaper follows your head (webcam; light stays on)
+#   bapirlo-sense look on|off       look away → videos pause + screen dims (webcam)
+#   bapirlo-sense focus on|off      hold your head toward a window to focus it (needs look; experimental)
+#   bapirlo-sense glass on|off      Liquid Glass bar / dock / island   (tint 0.15 = how dark · bend 1.0 = edge lens)
+#   bapirlo-sense pulse on|off      music-reactive glow
+#   bapirlo-sense spatial on|off    UI sounds from where things happen
+#   bapirlo-sense voice on|off      Super+K voice commands (offline)
+#   bapirlo-sense wake on|off       "Hey Kuro" wake word (mic stays open)
+#   bapirlo-sense listen            same as Super+K
+#   bapirlo-sense say "open spotify"   run a voice command from text (no mic)
+#   bapirlo-sense demo beat|away|sound-left|sound-right|glass
+# Camera jobs share the air-gestures daemon (~/.config/bapirlo/camera.json). Nothing is recorded or sent anywhere.
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/../lib/kuro-camera.sh"
+EXT=bapirlo-sense@bapirlo-os
+SD="$HOME/.local/share/gnome-shell/extensions/$EXT/schemas"
+gs() { gsettings --schemadir "$SD" "$1" org.gnome.shell.extensions.bapirlo-sense "${@:2}"; }
+call() { gdbus call --session -d org.bapirlo.Sense -o /org/bapirlo/Sense -m "org.bapirlo.Sense.$1" "${@:2}"; }
+onoff() { case "${1:-}" in on) echo true ;; off) echo false ;; *) echo "say on or off" >&2; exit 2 ;; esac; }
+note() { cam_note "${2:-camera-web-symbolic}" "Kuro Sense" "$1"; }
+# "<part> status" → on / off (What's New switches use it)
+if [[ "${2:-}" == status ]]; then
+  case "$1" in
+    head|look) cam_on "$1" && echo on || echo off ;;
+    focus) [[ $(gs get look-focus) == true ]] && echo on || echo off ;;
+    wake)  [[ $(gs get wake-word) == true ]] && echo on || echo off ;;
+    glass|pulse|spatial|voice) [[ $(gs get "$1") == true ]] && echo on || echo off ;;
+    *) echo off ;;
+  esac
+  exit 0
+fi
+case "${1:-status}" in
+  status)
+    echo "camera:  head=$(cam_get head)  look=$(cam_get look)  (daemon $(systemctl --user is-active "$KURO_CAM_UNIT" 2>/dev/null || true))"
+    for k in glass pulse spatial voice wake-word look-focus look-pause look-dim; do printf '%-12s %s\n' "$k" "$(gs get $k)"; done
+    echo "shell:   $(call Status 2>/dev/null | sed "s/^('//;s/',)$//" || echo 'extension not running (log out and back in?)')"
+    echo "pulse:   $(systemctl --user is-active kuro-pulse.service 2>/dev/null || true)   voice: $(systemctl --user is-active kuro-voice.service 2>/dev/null || true)" ;;
+  head|look)
+    v=$(onoff "${2:-}")
+    [[ -f "$HOME/.local/share/bapirlo/models/blaze_face_short_range.tflite" ]] || { echo "Face model missing — run: bash ~/bapirlo-os/gestures/setup.sh" >&2; exit 1; }
+    cam_set "$1" "$v"
+    [[ $1 == head ]] && msg="3D wallpaper follows your head" || msg="Look away → videos pause and the screen dims"
+    [[ $v == true ]] && note "On — $msg" || note "${1^} tracking off"
+    echo "$1 $2" ;;
+  focus)   gs set look-focus "$(onoff "${2:-}")"; echo "look-to-focus ${2}" ;;
+  glass|pulse|spatial|voice) gs set "$1" "$(onoff "${2:-}")"; echo "$1 $2" ;;
+  wake)    gs set wake-word "$(onoff "${2:-}")"; echo "wake word $2" ;;
+  tint)    gs set glass-tint "${2:?how dark, 0.0-0.6 (default 0.15)}"; echo "glass tint $2" ;;
+  bend)    gs set glass-strength "${2:?how strong, 0.0-2.0 (default 1.0)}"; echo "glass bend $2" ;;
+  listen)  call Listen >/dev/null ;;
+  say)     shift; call Command "$*" | sed "s/^('//;s/',)$//" ;;
+  demo)    call Demo "${2:-beat}" >/dev/null ;;
+  *) sed -n 2,16p "$0"; exit 2 ;;
+esac

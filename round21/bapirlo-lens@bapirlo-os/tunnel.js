@@ -1,7 +1,7 @@
 // Kuro Focus tunnel — while a focus block runs (Kuro Bar focus timer: Super+Alt+F), everything except the
 // window you're working in fades back behind a dark blurred veil. Switch windows and the veil follows.
 // The bar already holds notification banners during focus; the tunnel counts what came in and, when the
-// block ends, Kuro (the desktop creature) tells you — or a normal notification does if Kuro is off.
+// block ends, a notification tells you.
 import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import Meta from 'gi://Meta';
@@ -85,10 +85,7 @@ export class Tunnel {
             return;
         const apps = [...this._apps].filter(Boolean).slice(0, 3).join(', ');
         const text = `${this._held} notification${this._held === 1 ? '' : 's'} waited for you${apps ? ` (${apps})` : ''}`;
-        if (globalThis.kuroPet?.say)
-            globalThis.kuroPet.say(text, 6000);
-        else
-            Main.notify('Focus block done', text);
+        Main.notify('Focus block done', text);
         this._held = 0;
     }
 

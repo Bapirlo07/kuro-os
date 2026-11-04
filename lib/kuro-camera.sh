@@ -11,7 +11,7 @@ except Exception: d={}
 print("true" if d.get(sys.argv[2], sys.argv[2]=="hands") else "false")' "$KURO_CAM_CONF" "$1"
 }
 
-cam_set() {   # cam_set hands|guard true|false, then start / stop the daemon to match
+cam_set() {   # cam_set hands|guard|head|look true|false, then start / stop the daemon to match
     mkdir -p "$(dirname "$KURO_CAM_CONF")"
     # first time (no file yet): hands are "on" only if the daemon is already running for them
     local hands_now=false
@@ -20,10 +20,10 @@ cam_set() {   # cam_set hands|guard true|false, then start / stop the daemon to 
 p=sys.argv[1]
 try: d=json.load(open(p))
 except Exception: d={}
-d.setdefault("hands", sys.argv[4]=="true"); d.setdefault("guard", False)
+d.setdefault("hands", sys.argv[4]=="true"); d.setdefault("guard", False); d.setdefault("head", False); d.setdefault("look", False)
 d[sys.argv[2]] = sys.argv[3]=="true"
 t=p+".tmp"; json.dump(d, open(t,"w"), indent=1); os.replace(t,p)' "$KURO_CAM_CONF" "$1" "$2" "$hands_now"
-    if [[ "$(cam_get hands)" == true || "$(cam_get guard)" == true ]]; then
+    if [[ "$(cam_get hands)" == true || "$(cam_get guard)" == true || "$(cam_get head)" == true || "$(cam_get look)" == true ]]; then
         systemctl --user enable --now "$KURO_CAM_UNIT" >/dev/null 2>&1
     else
         systemctl --user disable --now "$KURO_CAM_UNIT" >/dev/null 2>&1

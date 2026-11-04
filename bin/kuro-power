@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Kuro OS — battery & heat autopilot.
+
+  kuro power                 what's using power right now (NVIDIA GPU, battery draw, busiest apps)
+  kuro power intel APP_ID    make an app always use the Intel GPU (a launcher override; restart the app)
+  kuro power undo APP_ID     take that override away
+  kuro power ignore APP_ID   never warn about this app again
+  kuro-power daemon          the watcher (kuro-power.service)
+
+The watcher (every 20 s, almost no CPU):
+  · the RTX 4060 should sleep unless a game / heavy app needs it. Awake > 90 s on battery → it finds the apps
+    holding it open and tells you, with "Keep it on Intel" (writes ~/.local/share/applications/APP.desktop
+    with the Intel/Mesa GPU picked for EGL + Vulkan — the same fix as the live wallpaper's) and "Ignore".
+  · an app using more than ~half a CPU core for 3 minutes on battery → one notification (Ignore = never again).
+  · games, Steam, OBS, Blender, DaVinci and anything while Game Mode is on are left alone.
+Nothing is closed or changed without your click. State: ~/.local/state/bapirlo/power.json
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+STATE = os.path.join(HOME, ".local/state/bapirlo/power.json")
+APPS = os.path.join(HOME, ".local/share/applications")
+SYS_APPS = ["/usr/share/applications", "/var/lib/flatpak/exports/share/applications",
+            os.path.join(HOME, ".local/share/flatpak/exports/share/applications")]
+INTEL_ENV = ("env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json "
+             "__GLX_VENDOR_LIBRARY_NAME=mesa VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json "
+             "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json DRI_PRIME=0 ")
+NEVER = re.compile(r"steam|reaper|wine|proton|lutris|heroic|gamescope|obs|blender|resolve|davinci|kdenlive|"
+                   r"nvidia|vlc-gpu|bapirlo-gaming", re.I)
+EVERY, GPU_AFTER, CPU_WINDOW, CPU_LIMIT = 20, 90, 180, 0.5
+TICK = os.sysconf("SC_CLK_TCK")
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE + ".tmp", "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(STATE + ".tmp", STATE)
+
+
+def dgpu():
+    for d in os.listdir("/sys/bus/pci/devices"):
+        p = f"/sys/bus/pci/devices/{d}"
+        try:
+            if open(p + "/vendor").read().strip() == "0x10de" and open(p + "/class").read().startswith("0x03"):
+                return p
+        except OSError:
+            pass
+    return None
+
+
+def gpu_awake(p):
+    try:
+        return open(p + "/power/runtime_status").read().strip() == "active"
+    except OSError:
+        return False
+
+
+def on_battery():
+    for b in os.listdir("/sys/class/power_supply"):
+        try:
+            if open(f"/sys/class/power_supply/{b}/type").read().strip() == "Battery":
+                return open(f"/sys/class/power_supply/{b}/status").read().strip() == "Discharging"
+        except OSError:
+            pass
+    return False
+
+
+def battery_watts():
+    for b in os.listdir("/sys/class/power_supply"):
+        base = f"/sys/class/power_supply/{b}"
+        try:
+            if open(base + "/type").read().strip() != "Battery":
+                continue
+            if os.path.exists(base + "/power_now"):
+                return int(open(base + "/power_now").read()) / 1e6
+            return int(open(base + "/current_now").read()) * int(open(base + "/voltage_now").read()) / 1e12
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def app_of(pid):
+    """The launcher id of a process (from its systemd scope: app-gnome-google\\x2dchrome-123.scope → google-chrome)."""
+    try:
+        cg = open(f"/proc/{pid}/cgroup").read()
+    except OSError:
+        return None
+    m = re.search(r"/app-(?:gnome-|flatpak-)?(.+?)(?:@[^/]*)?-\d+\.scope", cg) or re.search(r"/app-(?:gnome-)?(.+?)\.service", cg)
+    if not m:
+        return None
+    return m.group(1).encode().decode("unicode_escape")
+
+
+def comm(pid):
+    try:
+        return open(f"/proc/{pid}/comm").read().strip()
+    except OSError:
+        return "?"
+
+
+def gpu_holders():
+    """{app_id: [process names]} for our processes with /dev/nvidia* open."""
+    out = {}
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{pid}/fd/{fd}").startswith("/dev/nvidia"):
+                    app = app_of(pid) or comm(pid)
+                    out.setdefault(app, set()).add(comm(pid))
+                    break
+            except OSError:
+                pass
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def cpu_by_app():
+    """{app_id: total CPU seconds} of our processes, grouped by launcher scope."""
+    out = {}
+    uid = os.getuid()
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != uid:
+                continue
+            f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+            secs = (int(f[11]) + int(f[12])) / TICK
+        except (OSError, IndexError, ValueError):
+            continue
+        app = app_of(pid)
+        if app:
+            out[app] = out.get(app, 0.0) + secs
+    return out
+
+
+def desktop_name(app):
+    for d in [APPS] + SYS_APPS:
+        p = os.path.join(d, app + ".desktop")
+        if os.path.exists(p):
+            for line in open(p, errors="replace"):
+                if line.startswith("Name="):
+                    return line[5:].strip()
+    return app
+
+
+def intel(app):
+    """Write a launcher override that starts the app on the Intel GPU."""
+    mine = os.path.join(APPS, app + ".desktop")
+    src = mine if os.path.exists(mine) else next((os.path.join(d, app + ".desktop") for d in SYS_APPS
+                                                   if os.path.exists(os.path.join(d, app + ".desktop"))), None)
+    if not src:
+        return False, f"no launcher found for {app}"
+    text = open(src, errors="replace").read()
+    if "X-Kuro-Intel=true" in text:
+        return True, "already on Intel"
+    if src == mine:
+        shutil.copy(mine, mine + ".kuro-orig")
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("Exec=") and INTEL_ENV not in line:
+            line = "Exec=" + INTEL_ENV + line[5:]
+        elif line.startswith("PrefersNonDefaultGPU="):
+            line = "PrefersNonDefaultGPU=false"
+        elif line.startswith("DBusActivatable="):
+            line = "DBusActivatable=false"      # D-Bus launching skips Exec= (and so the GPU choice)
+        lines.append(line)
+        if line.strip() == "[Desktop Entry]":
+            lines.append("X-Kuro-Intel=true")
+    os.makedirs(APPS, exist_ok=True)
+    with open(mine + ".tmp", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(mine + ".tmp", mine)
+    run("update-desktop-database", APPS)
+    return True, f"{desktop_name(app)} will use the Intel GPU from its next start"
+
+
+def undo(app):
+    mine = os.path.join(APPS, app + ".desktop")
+    if os.path.exists(mine + ".kuro-orig"):
+        os.replace(mine + ".kuro-orig", mine)
+    elif os.path.exists(mine) and "X-Kuro-Intel=true" in open(mine, errors="replace").read():
+        os.remove(mine)
+    else:
+        return False
+    run("update-desktop-database", APPS)
+    return True
+
+
+def notify(title, body, actions, on_action):
+    args = ["notify-send", "-a", "Kuro Power", "-i", "battery-caution-symbolic", title, body]
+    for name, label in actions:
+        args[1:1] = ["-A", f"{name}={label}"]
+
+    def wait():
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=3 * 3600).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if out:
+            on_action(out)
+    threading.Thread(target=wait, daemon=True).start()
+
+
+def gaming():
+    return run("systemctl", "--user", "is-active", "bapirlo-gaming-mode") == "active"
+
+
+def daemon():
+    gpu = dgpu()
+    awake_since = None
+    told_gpu, told_cpu = set(), set()
+    hist = []                                 # [(t, {app: cpu_s})]
+    while True:
+        st = load()
+        ignore = set(st.get("ignore", []))
+        now = time.monotonic()
+        batt = on_battery()
+        if gpu and gpu_awake(gpu):
+            awake_since = awake_since or now
+            if batt and now - awake_since > GPU_AFTER and not gaming():
+                for app, procs in gpu_holders().items():
+                    if app in told_gpu or app in ignore or NEVER.search(app + " " + " ".join(procs)):
+                        continue
+                    told_gpu.add(app)
+                    name = desktop_name(app)
+
+                    def act(a, app=app, name=name):
+                        s = load()
+                        if a == "intel":
+                            ok, msg = intel(app)
+                            s.setdefault("intel", [])
+                            if ok and app not in s["intel"]:
+                                s["intel"].append(app)
+                            subprocess.run(["notify-send", "-a", "Kuro Power", name, msg + (" — restart it now to save battery" if ok else "")])
+                        elif a == "ignore":
+                            s.setdefault("ignore", []).append(app)
+                        save(s)
+                    notify(f"{name} is keeping the NVIDIA GPU awake",
+                           "That costs roughly 5–15 W of battery. It runs fine on the Intel GPU.",
+                           [("intel", "Keep it on Intel"), ("ignore", "Ignore")], act)
+        else:
+            awake_since = None
+        if batt:
+            hist.append((now, cpu_by_app()))
+            hist = [h for h in hist if now - h[0] <= CPU_WINDOW + EVERY]
+            if len(hist) >= 2 and now - hist[0][0] >= CPU_WINDOW * 0.9 and not gaming():
+                t0, a0 = hist[0]
+                for app, secs in hist[-1][1].items():
+                    use = (secs - a0.get(app, secs)) / (now - t0)
+                    if use > CPU_LIMIT and app not in told_cpu and app not in ignore and not NEVER.search(app):
+                        told_cpu.add(app)
+                        name = desktop_name(app)
+
+                        def act(a, app=app):
+                            if a == "ignore":
+                                s = load()
+                                s.setdefault("ignore", []).append(app)
+                                save(s)
+                        notify(f"{name} is working hard on battery",
+                               f"About {use * 100:.0f}% of a CPU core for the last 3 minutes. Closing it would save battery.",
+                               [("ignore", "Ignore")], act)
+        else:
+            hist.clear()
+        time.sleep(EVERY)
+
+
+def report():
+    gpu = dgpu()
+    print("NVIDIA GPU:", "AWAKE" if gpu and gpu_awake(gpu) else ("asleep ✓" if gpu else "not found"))
+    if gpu and gpu_awake(gpu):
+        h = gpu_holders()
+        print("  held open by:", ", ".join(f"{desktop_name(a)} ({', '.join(p)})" for a, p in h.items()) or
+              "nothing of yours (the system / a game?)")
+    w = battery_watts()
+    print("Battery:", "on battery" if on_battery() else "plugged in", f"· {w:.1f} W" if w else "")
+    a0 = cpu_by_app()
+    time.sleep(2)
+    a1 = cpu_by_app()
+    top = sorted(((a, (a1[a] - a0.get(a, a1[a])) / 2) for a in a1), key=lambda x: -x[1])[:5]
+    print("Busiest apps (last 2 s):")
+    for a, u in top:
+        if u > 0.01:
+            print(f"  {desktop_name(a):<28} {u * 100:5.0f}% of a core")
+    st = load()
+    if st.get("intel"):
+        print("On Intel by your choice:", ", ".join(desktop_name(a) for a in st["intel"]))
+    if st.get("ignore"):
+        print("Ignored:", ", ".join(st["ignore"]))
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "report"
+    if cmd == "daemon":
+        daemon()
+    elif cmd == "report":
+        report()
+    elif cmd == "intel" and len(a) > 1:
+        ok, msg = intel(a[1])
+        print(msg)
+        if ok:
+            st = load()
+            st.setdefault("intel", [])
+            if a[1] not in st["intel"]:
+                st["intel"].append(a[1])
+            save(st)
+        return 0 if ok else 1
+    elif cmd == "undo" and len(a) > 1:
+        ok = undo(a[1])
+        st = load()
+        st["intel"] = [x for x in st.get("intel", []) if x != a[1]]
+        save(st)
+        print("override removed — restart the app" if ok else "no Kuro override for " + a[1])
+    elif cmd == "ignore" and len(a) > 1:
+        st = load()
+        st.setdefault("ignore", []).append(a[1])
+        save(st)
+        print("won't warn about", a[1], "again")
+    else:
+        print(__doc__)
+        return 0 if cmd in ("-h", "--help", "help") else 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

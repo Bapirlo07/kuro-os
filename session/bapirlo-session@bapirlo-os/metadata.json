@@ -1,7 +1,7 @@
 {
   "uuid": "bapirlo-session@bapirlo-os",
   "name": "Kuro Session",
-  "description": "Kuro OS: remembers your open apps, terminal folders and Files folders, and reopens them after log out / restart. Window places come back via Smart Auto Move NG.",
+  "description": "Kuro OS: remembers your open apps, where every window was (workspace, monitor, position, size, maximised), terminal folders and Files folders, and puts it all back after log out / restart.",
   "shell-version": [
     "50",
     "51"

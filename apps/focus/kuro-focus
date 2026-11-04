@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""Kuro OS — Kuro Focus: the focus timer, Focus Lock and the iPhone lock in one app (GTK4 + libadwaita).
+
+  kuro-focus                 open it
+  kuro-focus --page=apps     open on a page (timer, apps, iphone)
+
+Pages
+  Timer    start / pause / stop a block (it runs in the top bar — Super+Alt+F does the same), focus on a
+           Lectern module (counts in Lectern's study log), today / this week / streak.
+  Apps     Focus Lock on/off and which apps stay usable during a block (everything else is minimised).
+  iPhone   the answer server for the iPhone Shortcuts automation: on/off, the link + QR code, the steps,
+           a new secret link.
+The timer lives in the Kuro Bar and the lock in the Kuro Study extension; this window only changes their
+settings, so closing it changes nothing.
+"""
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+BIN = os.path.join(ROOT, "bin")
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+import bapirlo_focus as focus  # noqa: E402
+
+APP_ID = "os.bapirlo.Focus"
+EXT_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
+                       "gnome-shell", "extensions")
+STUDY_SCHEMA = "org.gnome.shell.extensions.bapirlo-study"
+ALWAYS = "lectern.desktop"
+UNIT = "kuro-phone-focus.service"
+
+CSS = """
+window.kuro-focus { background-color: #0E0A0D; color: #F2E9EC; }
+.brand { font-family: Bangers; font-size: 26pt; letter-spacing: 2px; color: #FF4655; text-shadow: 3px 3px 0 #7A0F1A; }
+.tagline { color: #8E7680; }
+preferencesgroup > box > label.heading, .heading { font-family: Bangers; font-size: 15pt; letter-spacing: 1.5px; color: #FF4655; }
+list.boxed-list { background-color: rgba(22,16,21,0.94); border: 1px solid rgba(225,29,46,0.22); border-radius: 16px; }
+list.boxed-list > row { background-color: transparent; }
+list.boxed-list > row:hover { background-color: rgba(225,29,46,0.08); }
+switch:checked { background-color: #E11D2E; }
+button.kuro { border-radius: 10px; background-color: rgba(242,233,236,0.07); font-weight: 600; padding: 8px 18px; }
+button.kuro:hover { background-color: rgba(225,29,46,0.22); }
+button.kuro.accent { background-color: #E11D2E; color: #FFFFFF; }
+button.kuro.accent:hover { background-color: #FF4655; }
+viewswitcher button:checked { color: #FF4655; }
+.dial { background-color: rgba(22,16,21,0.94); border: 1px solid rgba(225,29,46,0.22); border-radius: 24px; padding: 26px; }
+.big-time { font-family: "JetBrains Mono", monospace; font-size: 54pt; font-weight: 800; color: #F2E9EC; }
+.big-time.focus { color: #FF4655; }
+.big-time.break { color: #F08AA4; }
+.phase { font-weight: 800; letter-spacing: 3px; font-size: 10pt; color: #8E7680; }
+.stat-num { font-size: 20pt; font-weight: 800; color: #F2E9EC; }
+.stat-lbl { font-size: 9pt; color: #8E7680; }
+.mono { font-family: "JetBrains Mono", monospace; font-size: 9pt; color: #CAB5BF; }
+.qr { background-color: #FFFFFF; border-radius: 14px; padding: 10px; }
+.dot { border-radius: 99px; min-width: 10px; min-height: 10px; }
+.ok { color: #6BD59A; }
+.bad { color: #FF4655; }
+"""
+
+
+def run(argv, timeout=15):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, r.stdout, r.stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "", str(e)
+
+
+def study_settings():
+    d = os.path.join(EXT_DIR, "bapirlo-study@bapirlo-os", "schemas")
+    try:
+        src = Gio.SettingsSchemaSource.new_from_directory(d, Gio.SettingsSchemaSource.get_default(), False) \
+            if os.path.isdir(d) else Gio.SettingsSchemaSource.get_default()
+        schema = src.lookup(STUDY_SCHEMA, True)
+        if schema and schema.has_key("focus-allowed"):
+            return Gio.Settings.new_full(schema, None, None)
+    except GLib.Error:
+        pass
+    return None
+
+
+def mmss(s):
+    s = max(0, int(s))
+    return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}"
+
+
+class KuroFocus(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win = None
+
+    def do_activate(self):
+        if self.win:
+            self.win.present()
+            return
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        prov = Gtk.CssProvider()
+        prov.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.study = study_settings()
+        self.win = Adw.ApplicationWindow(application=self, title="Kuro Focus", default_width=720,
+                                         default_height=860)
+        self.win.add_css_class("kuro-focus")
+        self.toasts = Adw.ToastOverlay()
+        self.stack = Adw.ViewStack()
+        self.stack.add_titled_with_icon(self.page_timer(), "timer", "Timer", "preferences-system-time-symbolic")
+        self.stack.add_titled_with_icon(self.page_apps(), "apps", "Blocked apps", "action-unavailable-symbolic")
+        self.stack.add_titled_with_icon(self.page_iphone(), "iphone", "iPhone", "phone-symbolic")
+        view = Adw.ToolbarView()
+        hb = Adw.HeaderBar()
+        hb.set_title_widget(Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE))
+        view.add_top_bar(hb)
+        self.toasts.set_child(self.stack)
+        view.set_content(self.toasts)
+        self.win.set_content(view)
+        for a in sys.argv:
+            if a.startswith("--page="):
+                self.stack.set_visible_child_name(a.split("=", 1)[1])
+        self.stack.connect("notify::visible-child-name", lambda *_: self.on_page())
+        self.on_page()
+        self.tick()
+        self._tick = GLib.timeout_add(1000, self.tick)
+        self.win.connect("close-request", self.on_close)
+        self.win.present()
+
+    def on_close(self, *_):
+        if self._tick:
+            GLib.source_remove(self._tick)
+            self._tick = 0
+        return False
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def header(self, page, title, tagline):
+        g = Adw.PreferencesGroup()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.append(Gtk.Label(label=title, xalign=0, css_classes=["brand"]))
+        box.append(Gtk.Label(label=tagline, xalign=0, wrap=True, css_classes=["tagline"]))
+        g.add(box)
+        page.add(g)
+
+    def button(self, label, cb, accent=False):
+        b = Gtk.Button(label=label, css_classes=["kuro"] + (["accent"] if accent else []))
+        b.connect("clicked", lambda *_: cb())
+        return b
+
+    def in_thread(self, work, done=None):
+        def go():
+            res = work()
+            if done:
+                GLib.idle_add(lambda: (done(res), False)[1])
+        threading.Thread(target=go, daemon=True).start()
+
+    # ================================================================ Timer
+    def page_timer(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "KURO FOCUS", "One block at a time. While it runs, notifications wait and only your "
+                                        "allowed apps open — on this PC and on your iPhone.")
+        g = Adw.PreferencesGroup()
+        dial = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["dial"])
+        self.phase_lbl = Gtk.Label(label="READY", css_classes=["phase"])
+        self.time_lbl = Gtk.Label(label="25:00", css_classes=["big-time"])
+        self.lock_lbl = Gtk.Label(label="", css_classes=["tagline"])
+        dial.append(self.phase_lbl)
+        dial.append(self.time_lbl)
+        dial.append(self.lock_lbl)
+        btns = Gtk.Box(spacing=10, halign=Gtk.Align.CENTER, margin_top=12)
+        self.start_btn = self.button("Start", self.on_start, accent=True)
+        self.pause_btn = self.button("Pause", lambda: self.request("pause"))
+        for b in (self.start_btn, self.pause_btn):
+            btns.append(b)
+        dial.append(btns)
+        g.add(dial)
+        page.add(g)
+
+        g = Adw.PreferencesGroup(title="Block length")
+        self.len_row = Adw.SpinRow.new_with_range(5, 240, 5)
+        self.len_row.set_title("Focus minutes")
+        self.len_row.set_value(focus.get("focus-minutes") or 25)
+        self.len_row.connect("notify::value", lambda r, _p: focus._gs("set", focus.SCHEMA, "focus-minutes",
+                                                                      str(int(r.get_value()))))
+        g.add(self.len_row)
+        self.brk_row = Adw.SpinRow.new_with_range(0, 60, 1)
+        self.brk_row.set_title("Break minutes")
+        self.brk_row.set_subtitle("Starts by itself after a block; apps are free during it")
+        self.brk_row.set_value(focus.get("break-minutes") or 5)
+        self.brk_row.connect("notify::value", lambda r, _p: focus._gs("set", focus.SCHEMA, "break-minutes",
+                                                                      str(int(r.get_value()))))
+        g.add(self.brk_row)
+        page.add(g)
+
+        self.mod_group = Adw.PreferencesGroup(title="Focus on a module",
+                                              description="The block is written into Lectern's study log for it")
+        page.add(self.mod_group)
+        self.in_thread(lambda: run([os.path.join(BIN, "kuro-study"), "summary", "--json"]), self.fill_modules)
+
+        g = Adw.PreferencesGroup(title="Your focus")
+        stats = Gtk.Box(spacing=0, homogeneous=True, css_classes=["dial"])
+        self.stat = {}
+        for key, lbl in (("today", "today"), ("week", "this week"), ("streak", "day streak")):
+            b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            n = Gtk.Label(label="–", css_classes=["stat-num"])
+            b.append(n)
+            b.append(Gtk.Label(label=lbl, css_classes=["stat-lbl"]))
+            stats.append(b)
+            self.stat[key] = n
+        g.add(stats)
+        page.add(g)
+        self.update_stats()
+        return page
+
+    def fill_modules(self, res):
+        import json
+        ok, out, _err = res
+        try:
+            mods = json.loads(out).get("modules", []) if ok else []
+        except ValueError:
+            mods = []
+        if not mods:
+            self.mod_group.add(Adw.ActionRow(title="No Lectern modules found"))
+            return
+        for m in mods:
+            row = Adw.ActionRow(title=m["code"], subtitle=m.get("title", ""), activatable=True)
+            dot = Gtk.Box(valign=Gtk.Align.CENTER, css_classes=["dot"])
+            prov = Gtk.CssProvider()
+            prov.load_from_string(f"box {{ background-color: {m.get('color', '#E11D2E')}; }}")
+            dot.get_style_context().add_provider(prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2)
+            row.add_prefix(dot)
+            row.add_suffix(Gtk.Image(icon_name="media-playback-start-symbolic"))
+            row.connect("activated", lambda _r, m=m: self.focus_on(m))
+            self.mod_group.add(row)
+
+    def focus_on(self, m):
+        st = focus.state()
+        if st and st["phase"]:
+            self.toast("A block is already running — stop it first")
+            return
+        mins = str(int(self.len_row.get_value()))
+        self.in_thread(lambda: run([os.path.join(BIN, "kuro-study"), "focus", m["id"], mins]),
+                       lambda r: self.toast(f"Focusing on {m['code']}" if r[0] else f"Couldn't start: {r[2].strip()}"))
+
+    def on_start(self):
+        st = focus.state()
+        if st is None:
+            self.toast("The Kuro bar isn't running — the timer lives in it")
+            return
+        if st["phase"]:
+            self.request("stop")
+        else:
+            focus.request("start", int(self.len_row.get_value()))
+
+    def request(self, verb):
+        if not focus.request(verb):
+            self.toast("Couldn't reach the Kuro bar")
+
+    def update_stats(self):
+        s = focus.summary()
+        self.stat["today"].set_label(focus.hm(s["today_min"]))
+        self.stat["week"].set_label(focus.hm(s["week_min"]))
+        self.stat["streak"].set_label(str(s["streak"]))
+
+    def tick(self):
+        st = focus.state()
+        phase = (st or {}).get("phase", "")
+        for c in ("focus", "break"):
+            self.time_lbl.remove_css_class(c)
+        if phase:
+            self.time_lbl.add_css_class(phase)
+            self.time_lbl.set_label(mmss(st["left"]))
+            self.phase_lbl.set_label(("FOCUS" if phase == "focus" else "BREAK") + (" · PAUSED" if st["paused"] else ""))
+            self.start_btn.set_label("Stop")
+            self.pause_btn.set_label("Resume" if st["paused"] else "Pause")
+        else:
+            self.time_lbl.set_label(mmss(int(self.len_row.get_value()) * 60))
+            self.phase_lbl.set_label("READY" if st is not None else "KURO BAR NOT RUNNING")
+            self.start_btn.set_label("Start")
+        self.pause_btn.set_visible(bool(phase))
+        locked = self.study and self.study.get_boolean("focus-lock")
+        n = len(self.study.get_strv("focus-allowed")) if self.study else 0
+        if phase == "focus" and locked:
+            self.lock_lbl.set_label(f"🔒 Apps locked — {n} allowed")
+        elif locked:
+            self.lock_lbl.set_label(f"Focus Lock on — {n} apps allowed")
+        else:
+            self.lock_lbl.set_label("Focus Lock off — every app stays open")
+        if self._last_phase != phase:
+            if self._last_phase == "focus":
+                self.update_stats()
+            self._last_phase = phase
+        return True
+
+    _last_phase = None
+    _tick = 0
+
+    # ================================================================ Apps
+    def page_apps(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "BLOCKED APPS", "During a focus block every app is minimised except the ones you "
+                                          "allow here. Breaks are free; windows come back when the block ends.")
+        if not self.study:
+            g = Adw.PreferencesGroup()
+            g.add(Adw.ActionRow(title="Kuro Study isn't installed",
+                                subtitle="Run ~/bapirlo-os/3000-focus-lock.sh, then log out and back in"))
+            page.add(g)
+            return page
+        g = Adw.PreferencesGroup()
+        lock = Adw.SwitchRow(title="Focus Lock", subtitle="Block every app that isn't allowed while a block runs")
+        self.study.bind("focus-lock", lock, "active", Gio.SettingsBindFlags.DEFAULT)
+        g.add(lock)
+        page.add(g)
+
+        self.allowed_group = Adw.PreferencesGroup(title="Allowed")
+        page.add(self.allowed_group)
+        self.others_group = Adw.PreferencesGroup(title="Blocked")
+        search = Gtk.SearchEntry(placeholder_text="Find an app", valign=Gtk.Align.CENTER)
+        search.connect("search-changed", lambda e: self.filter_apps(e.get_text()))
+        self.others_group.set_header_suffix(search)
+        page.add(self.others_group)
+        self.app_rows = {}
+        self.build_app_rows()
+        self.study.connect("changed::focus-allowed", lambda *_: self.build_app_rows())
+        return page
+
+    def build_app_rows(self):
+        allowed = self.study.get_strv("focus-allowed")
+        for row, _grp in self.app_rows.values():
+            _grp.remove(row)
+        self.app_rows = {}
+        apps = {}
+        for a in Gio.AppInfo.get_all():
+            if a.should_show() and a.get_id():
+                apps[a.get_id()] = a
+        ids = sorted(apps, key=lambda i: (i not in allowed, apps[i].get_display_name().lower()))
+        for i in ids:
+            a = apps[i]
+            grp = self.allowed_group if i in allowed or i == ALWAYS else self.others_group
+            row = Adw.ActionRow(title=GLib.markup_escape_text(a.get_display_name()))
+            if a.get_icon():
+                row.add_prefix(Gtk.Image(gicon=a.get_icon(), pixel_size=32))
+            sw = Gtk.Switch(valign=Gtk.Align.CENTER, active=i in allowed or i == ALWAYS)
+            if i == ALWAYS:
+                sw.set_sensitive(False)
+                row.set_subtitle("Always allowed")
+            sw.connect("notify::active", lambda s, _p, i=i: self.set_allowed(i, s.get_active()))
+            row.add_suffix(sw)
+            row.set_activatable_widget(sw)
+            grp.add(row)
+            self.app_rows[i] = (row, grp)
+        if hasattr(self, "_filter"):
+            self.filter_apps(self._filter)
+
+    def set_allowed(self, app_id, on):
+        cur = self.study.get_strv("focus-allowed")
+        new = [a for a in cur if a != app_id] + ([app_id] if on else [])
+        if ALWAYS not in new:
+            new.insert(0, ALWAYS)
+        if new != cur:
+            GLib.idle_add(lambda: (self.study.set_strv("focus-allowed", new), False)[1])
+
+    def filter_apps(self, text):
+        self._filter = text
+        t = text.lower().strip()
+        for i, (row, grp) in self.app_rows.items():
+            if grp is self.others_group:
+                row.set_visible(not t or t in row.get_title().lower() or t in i.lower())
+
+    # ================================================================ iPhone
+    def page_iphone(self):
+        page = Adw.PreferencesPage()
+        self.header(page, "IPHONE LOCK", "Your iPhone asks this PC whether you're in a block whenever you open a "
+                                         "distracting app, and goes back to the Home Screen if you are.")
+        g = Adw.PreferencesGroup()
+        self.srv_row = Adw.SwitchRow(title="Answer the iPhone",
+                                     subtitle="Local network only, port 1764, secret link")
+        self.srv_row.connect("notify::active", self.on_server_switch)
+        g.add(self.srv_row)
+        self.state_row = Adw.ActionRow(title="Right now the phone is told", subtitle="…")
+        g.add(self.state_row)
+        page.add(g)
+
+        g = Adw.PreferencesGroup(title="Your link", description="Scan the QR with the iPhone camera, or copy the "
+                                                                 "link and send it to the phone")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
+        self.qr = Gtk.Picture(css_classes=["qr"], can_shrink=False)
+        box.append(self.qr)
+        g.add(box)
+        self.link_rows = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE,
+                                     margin_top=12)
+        g.add(self.link_rows)
+        newk = self.button("Make a new link", self.on_new_key)
+        newk.set_tooltip_text("The old link stops working — paste the new one into the Shortcut")
+        newk.set_halign(Gtk.Align.CENTER)
+        newk.set_margin_top(10)
+        g.add(newk)
+        page.add(g)
+
+        g = Adw.PreferencesGroup(title="Set up the iPhone (once)")
+        steps = [
+            ("Shortcuts → Automation → +  → App", "Pick the apps to block (Instagram, TikTok, YouTube, games…)"),
+            ("Keep “Is Opened”, choose Run Immediately", "Turn “Notify When Run” off → Next → New Blank Automation"),
+            ("Add “Get Contents of URL”", "Paste your link"),
+            ("Add “If” → Contents of URL → contains → focus", ""),
+            ("Inside the If: “Show Notification”, then “Go to Home Screen”", "Leave Otherwise empty — done"),
+            ("Test it", "Start a block here, open one of those apps on the phone"),
+        ]
+        for n, (t, s) in enumerate(steps, 1):
+            row = Adw.ActionRow(title=GLib.markup_escape_text(t), subtitle=GLib.markup_escape_text(s))
+            row.add_prefix(Gtk.Label(label=str(n), css_classes=["stat-num"], width_chars=2))
+            g.add(row)
+        page.add(g)
+        g = Adw.PreferencesGroup(description="Away from this PC's network (or with the PC asleep) the phone can't "
+                                             "ask, so the app just opens. If campus Wi-Fi blocks it, put the PC on "
+                                             "your iPhone's hotspot.")
+        page.add(g)
+        return page
+
+    def on_page(self):
+        if self.stack.get_visible_child_name() == "iphone":
+            self.refresh_iphone()
+
+    def refresh_iphone(self):
+        def work():
+            ok, out, _ = run(["systemctl", "--user", "is-active", UNIT], 5)
+            active = out.strip() == "active"
+            ok2, links, _ = run([os.path.join(BIN, "kuro-phone-focus"), "links"], 10)
+            _ok3, ans, _ = run([os.path.join(BIN, "kuro-phone-focus"), "status"], 10)
+            return active, links.split() if ok2 else [], ans.strip()
+        self.in_thread(work, self.show_iphone)
+
+    def show_iphone(self, res):
+        active, links, ans = res
+        self._setting_switch = True
+        self.srv_row.set_active(active)
+        self._setting_switch = False
+        word = {"idle": "idle — apps open", "break": "break — apps open"}.get(ans, ans)
+        if ans.startswith("focus"):
+            word = f"focus ({ans.split()[-1]} min left) — apps blocked"
+        self.state_row.set_subtitle(word if active else "nothing — the server is off")
+        while (child := self.link_rows.get_first_child()):
+            self.link_rows.remove(child)
+        for i, link in enumerate(links):
+            row = Adw.ActionRow(title=GLib.markup_escape_text(link), css_classes=["mono"],
+                                subtitle="this PC's name" if i == 0 else "this PC's address (if the name fails)")
+            row.set_title_selectable(True)
+            copy = Gtk.Button(icon_name="edit-copy-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+            copy.connect("clicked", lambda _b, l=link: (self.win.get_clipboard().set(l), self.toast("Link copied")))
+            row.add_suffix(copy)
+            self.link_rows.append(row)
+        if links:
+            path = os.path.join(tempfile.gettempdir(), f"kuro-focus-qr-{os.getuid()}.png")
+            ok, _o, _e = run(["qrencode", "-s", "7", "-m", "1", "-o", path, links[0]], 5)
+            if ok:
+                self.qr.set_filename(path)
+                os.unlink(path)
+
+    def on_server_switch(self, row, _p):
+        if getattr(self, "_setting_switch", False):
+            return
+        verb = ["enable", "--now"] if row.get_active() else ["disable", "--now"]
+        self.in_thread(lambda: run(["systemctl", "--user"] + verb + [UNIT]),
+                       lambda r: (self.toast("iPhone lock " + ("on" if row.get_active() else "off")
+                                             if r[0] else f"Failed: {r[2].strip()}"), self.refresh_iphone()))
+
+    def on_new_key(self):
+        self.in_thread(lambda: run([os.path.join(BIN, "kuro-phone-focus"), "new-key"]),
+                       lambda r: (self.toast("New link — paste it into the Shortcut again"), self.refresh_iphone()))
+
+
+if __name__ == "__main__":
+    GLib.set_application_name("Kuro Focus")
+    sys.exit(KuroFocus().run([a for a in sys.argv if not a.startswith("--page=")]))

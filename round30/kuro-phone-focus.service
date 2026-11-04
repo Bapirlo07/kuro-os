@@ -1,0 +1,14 @@
+[Unit]
+Description=Kuro Focus Lock for the iPhone — answers "focus / break / idle" to the iPhone Shortcuts automation (LAN only)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/bapirlo-os/bin/kuro-phone-focus serve
+Restart=on-failure
+RestartSec=20
+Nice=10
+MemoryMax=64M
+
+[Install]
+WantedBy=graphical-session.target

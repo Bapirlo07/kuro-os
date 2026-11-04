@@ -56,7 +56,7 @@ hl.config({
     decoration = {
         rounding         = 14,
         active_opacity   = 1.0,
-        inactive_opacity = 0.94,
+        inactive_opacity = 1.0,   -- 0.94 forced re-blurring the live video every frame (lag)
         shadow = {
             enabled      = true,
             range        = 18,
@@ -67,7 +67,7 @@ hl.config({
         blur = {
             enabled           = true,
             size              = 6,
-            passes            = 2,
+            passes            = 1,
             vibrancy          = 0.17,
             new_optimizations = true,
         },
@@ -107,7 +107,7 @@ hl.curve("slash", { type = "bezier", points = { {0.7, 0},  {0.2, 1}  } })
 hl.animation({ leaf = "windows",     enabled = true, speed = 5,  bezier = "snap",    style = "popin 82%" })
 hl.animation({ leaf = "windowsOut",  enabled = true, speed = 4,  bezier = "slash",   style = "popin 82%" })
 hl.animation({ leaf = "border",      enabled = true, speed = 8,  bezier = "default" })
-hl.animation({ leaf = "borderangle", enabled = true, speed = 60, bezier = "default", style = "loop" })
+hl.animation({ leaf = "borderangle", enabled = false })  -- "loop" redrew the whole screen at 240 Hz forever (lag)
 hl.animation({ leaf = "fade",        enabled = true, speed = 5,  bezier = "snap" })
 hl.animation({ leaf = "workspaces",  enabled = true, speed = 5,  bezier = "slash",   style = "slidefade 18%" })
 hl.animation({ leaf = "layers",      enabled = true, speed = 4,  bezier = "snap",    style = "fade" })

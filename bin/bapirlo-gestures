@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kuro Air Gestures (webcam): bapirlo-gestures on | off | toggle | status | help
+# Kuro Air Gestures (webcam): bapirlo-gestures on | off | toggle | status | test | calibrate reset | help
 #   on  = start now and at every login · off = stop and stay off (camera released)
 . "$(dirname "$(readlink -f "$0")")/../lib/kuro-camera.sh"     # shares the camera with bapirlo-guard
 help() { cat <<'H'
@@ -30,6 +30,17 @@ case "${1:-status}" in
   toggle) if cam_on hands; then "$0" off; else "$0" on; fi ;;
   status) if cam_on hands; then echo "on"; else echo "off"; fi ;;
   help|-h|--help) help ;;
+  test)   # accuracy test + personal calibration (turns the hand job on for the test if it was off)
+          was=$(cam_get hands)
+          [[ "$was" == true ]] || { cam_set hands true; sleep 4; }
+          "$HOME/.local/share/bapirlo/gesture-venv/bin/python" -I "$(dirname "$(readlink -f "$0")")/../gestures/kuro-gestures-test.py" "${@:2}" 2>&1 \
+            | grep -vE '^(I|W)0000|inference_feedback_manager|landmark_projection_calculator|gl_context'
+          [[ "$was" == true ]] || cam_set hands false ;;
+  calibrate)
+          [[ "${2:-}" == reset ]] || { echo "usage: bapirlo-gestures calibrate reset   (run 'bapirlo-gestures test' to calibrate)"; exit 2; }
+          python3 -c 'import json,os,sys
+p=sys.argv[1]; d=json.load(open(p)); d.pop("calibration",None); t=p+".tmp"; json.dump(d,open(t,"w"),indent=2); os.replace(t,p)' "$HOME/.config/bapirlo/gestures.json"
+          echo "calibration removed — back to the built-in numbers" ;;
   sheet)  gdbus call --session -d org.bapirlo.Gestures -o /org/bapirlo/Gestures -m org.bapirlo.Gestures.Help >/dev/null ;;
-  *) echo "usage: bapirlo-gestures on|off|toggle|status|sheet|help" >&2; exit 2 ;;
+  *) echo "usage: bapirlo-gestures on|off|toggle|status|test|calibrate reset|sheet|help" >&2; exit 2 ;;
 esac

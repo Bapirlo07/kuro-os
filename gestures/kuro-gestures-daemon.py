@@ -32,6 +32,23 @@ Round 21 — one camera, two jobs (~/.config/bapirlo/camera.json → {"hands": b
     upper-middle crop (where someone looking over your shoulder stands). Only 5 frames/s are decoded when
     hands are off. Nothing is ever saved or sent anywhere.
 The daemon owns org.bapirlo.GesturesCam while hands are on and org.bapirlo.KuroGuardCam while guard is on.
+
+Round 28 — both hands. MediaPipe already looked for two hands; now the second one is used too:
+  * the hand view draws both skeletons (Hand2(pts, pose, progress) for the second one)
+  * two hands in view for 0.2 s = two-hand mode: one-hand swipes, holds and pinch-clicks pause (so the
+    second hand can't set them off by accident); the red dot still follows the first hand
+  * 🤏🤏 pinch with BOTH hands, then pull them apart / push together .... Dial("spread", d)  (zoom in / out)
+  * ✋✋ both palms held still ........................................... two-palms
+  Dropping one hand goes straight back to normal one-hand gestures.
+
+Round 25 — Kuro Sense, two more jobs for the same camera (camera.json "head" / "look", both off by default):
+  * head = the biggest face's position → org.bapirlo.Sense.Head(x, y, z) up to 30×/s, for the head-tracked 3D
+    wallpaper. x/y -1…1 from where you usually sit (a slow average, so it re-centres if you move your chair),
+    mirrored (lean right → x > 0); z = how near (1 = usual). Only sent while it changes.
+  * look = are you looking at the screen? → Look(facing, present) on change (after 0.6 s steady) + every 2 s,
+    and Point(x, y) = where your head points on the screen (0…1) 5×/s, for look-to-focus. Facing = a face
+    whose nose sits between its ears (head turned < ~25°).
+  Both use the BlazeFace model the guard uses. The daemon owns org.bapirlo.KuroSenseCam while either is on.
 """
 import collections
 import json
@@ -58,6 +75,7 @@ CAMCONF = os.path.expanduser("~/.config/bapirlo/camera.json")
 FACE_MODEL = os.path.expanduser("~/.local/share/bapirlo/models/blaze_face_short_range.tflite")
 MIRROR_FLAG = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kuro-gestures-mirror")
 SHELL = DBusAddress("/org/bapirlo/Gestures", bus_name="org.bapirlo.Gestures", interface="org.bapirlo.Gestures")
+SENSE = DBusAddress("/org/bapirlo/Sense", bus_name="org.bapirlo.Sense", interface="org.bapirlo.Sense")
 SAVER = DBusAddress("/org/gnome/ScreenSaver", bus_name="org.gnome.ScreenSaver", interface="org.gnome.ScreenSaver")
 PROFILE = os.environ.get("KURO_GEST_PROFILE") == "1"
 
@@ -78,6 +96,9 @@ IDLE_FPS = 10
 GUARD_FPS = 5                            # decode rate when only the guard is on
 GUARD_EVERY = 0.25                       # s between face checks
 GUARD_CLEAR = 1.5                        # s with no second face before the screen comes back
+TWO_ENTER = 0.2                          # s both hands must be seen before two-hand mode starts
+TWO_LOST = 0.35                          # s the second hand may vanish before two-hand mode ends
+TWO_HOLD = 0.7                           # s both palms held still = two-palms
 STATIC_AFTER = 30.0                      # s a face may sit perfectly still before it's taken for a picture
 running = True
 
@@ -119,6 +140,7 @@ class Shell:
     def __init__(self):
         self.conn = open_dbus_connection(bus="SESSION")
         self.owned = set()       # org.bapirlo.GesturesCam / KuroGuardCam — see own()
+        self.muted = False       # accuracy test running: show the hand, but don't DO anything
 
     def own(self, name, want):
         """Hold or let go of a bus name (so the shell knows which camera jobs are running)."""
@@ -135,9 +157,14 @@ class Shell:
         except Exception as e:
             log(f"name {name}: {e}")
 
-    def call(self, method, sig=None, *args):
+    def call(self, method, sig=None, *args, to=SHELL):
+        if self.muted and to is SHELL:
+            if method in ("Gesture", "Dial"):
+                return
+            if method == "Pointer":
+                args = (args[0], args[1], False, args[3])     # no clicks / drags during the test
         try:
-            msg = new_method_call(SHELL, method, sig, args) if sig else new_method_call(SHELL, method)
+            msg = new_method_call(to, method, sig, args) if sig else new_method_call(to, method)
             msg.header.flags = MessageFlag.no_reply_expected      # fire and forget, and no replies piling up
             self.conn.send(msg)
         except Exception as e:
@@ -171,6 +198,7 @@ class Modes:
     """~/.config/bapirlo/camera.json, checked once a second. No file = hands on, guard off."""
     def __init__(self):
         self.hands, self.guard, self.mtime, self.checked = True, False, -1, 0.0
+        self.head = self.look = False
         self.refresh(force=True)
 
     def refresh(self, force=False):
@@ -191,7 +219,12 @@ class Modes:
         except Exception:
             d = {}
         self.hands, self.guard = bool(d.get("hands", True)), bool(d.get("guard", False))
-        log(f"modes: hands={self.hands} guard={self.guard}")
+        self.head, self.look = bool(d.get("head", False)), bool(d.get("look", False))
+        log(f"modes: hands={self.hands} guard={self.guard} head={self.head} look={self.look}")
+
+    @property
+    def any(self):
+        return self.hands or self.guard or self.head or self.look
 
 
 class Guard:
@@ -296,6 +329,98 @@ class Guard:
                 self._send(False, now)
         if self.on and now - self.sent_t > 3:      # say it again now and then, in case the shell restarted
             self._send(True, now)
+
+
+class Face:
+    """Kuro Sense: head position (job "head") and "looking at the screen?" (job "look") from the biggest face."""
+    HEAD_EVERY = 1 / 30
+    LOOK_EVERY = 0.2
+    SPAN = 0.22            # face-centre travel (fraction of the picture) that counts as a full lean
+
+    def __init__(self, shell):
+        self.shell = shell
+        self.det = None
+        self.last = 0.0
+        self.base = None               # [cx, cy, w] — where you usually sit (slow average)
+        self.fx, self.fy = OneEuro(min_cutoff=0.8, beta=3.0), OneEuro(min_cutoff=0.8, beta=3.0)
+        self.sent_head = (9.0, 9.0, 9.0)
+        self.sent_head_t = 0.0
+        self.facing = True
+        self.cand, self.cand_since = True, 0.0
+        self.sent_look_t = 0.0
+        self.last_point = 0.0
+        self.yaw_s = 0.0
+
+    def _detector(self):
+        if self.det is None:
+            opts = vision.FaceDetectorOptions(base_options=BaseOptions(model_asset_path=FACE_MODEL),
+                                              min_detection_confidence=0.5)
+            self.det = vision.FaceDetector.create_from_options(opts)
+        return self.det
+
+    def reset(self):
+        """Job switched off / screen locked: tell the shell 'looking' so nothing stays dimmed."""
+        if not self.facing:
+            self.shell.call("Look", "bb", True, True, to=SENSE)
+        self.facing = self.cand = True
+        self.fx.reset(), self.fy.reset()
+
+    def step(self, frame, lut, now, head_on, look_on):
+        if now - self.last < (self.HEAD_EVERY if head_on else self.LOOK_EVERY):
+            return
+        self.last = now
+        small = cv2.resize(frame, (INFER_W, INFER_H), interpolation=cv2.INTER_AREA)
+        if lut is not None:
+            small = cv2.LUT(small, lut)
+        img = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+        try:
+            dets = self._detector().detect(img).detections
+        except Exception as e:
+            log(f"face: {e}")
+            return
+        face = max(dets, key=lambda d: d.bounding_box.width, default=None)
+        present = face is not None
+        yaw = None
+        if present:
+            b = face.bounding_box
+            cx, cy, w = (b.origin_x + b.width / 2) / INFER_W, (b.origin_y + b.height / 2) / INFER_H, b.width / INFER_W
+            kp = face.keypoints   # right eye, left eye, nose tip, mouth, right ear, left ear (image coords 0…1)
+            if len(kp) >= 6:
+                ear_mid = (kp[4].x + kp[5].x) / 2
+                ear_d = abs(kp[5].x - kp[4].x) or 1e-3
+                yaw = (kp[2].x - ear_mid) / ear_d
+                self.yaw_s = 0.7 * self.yaw_s + 0.3 * yaw
+            if self.base is None:
+                self.base = [cx, cy, w]
+            else:                                     # ~20 s to re-centre
+                a = 0.0017 if head_on else 0.01
+                self.base = [self.base[0] + (cx - self.base[0]) * a, self.base[1] + (cy - self.base[1]) * a,
+                             self.base[2] + (w - self.base[2]) * a]
+            if head_on:
+                hx = self.fx(max(-1.5, min(1.5, -(cx - self.base[0]) / self.SPAN)), now)
+                hy = self.fy(max(-1.5, min(1.5, (cy - self.base[1]) / self.SPAN)), now)
+                hz = w / max(self.base[2], 1e-3)
+                if max(abs(hx - self.sent_head[0]), abs(hy - self.sent_head[1])) > 0.004 or now - self.sent_head_t > 0.4:
+                    self.shell.call("Head", "ddd", float(hx), float(hy), float(hz), to=SENSE)
+                    self.sent_head, self.sent_head_t = (hx, hy, hz), now
+        if not look_on:
+            return
+        facing_now = present and (yaw is None or abs(self.yaw_s) < (0.30 if self.facing else 0.22))
+        if facing_now != self.cand:
+            self.cand, self.cand_since = facing_now, now
+        changed = self.cand != self.facing and now - self.cand_since > 0.6
+        if changed:
+            self.facing = self.cand
+        if changed or now - self.sent_look_t > 2:
+            self.shell.call("Look", "bb", self.facing, present, to=SENSE)
+            self.sent_look_t = now
+        if present and yaw is not None and now - self.last_point > 0.2 and self.base is not None:
+            b = face.bounding_box
+            cy = (b.origin_y + b.height / 2) / INFER_H
+            px = 0.5 - self.yaw_s * 1.6 - (cx - self.base[0]) * 1.2
+            py = 0.5 + (cy - self.base[1]) * 2.0
+            self.shell.call("Point", "dd", float(max(0, min(1, px))), float(max(0, min(1, py))), to=SENSE)
+            self.last_point = now
 
 
 def v4l2_get(ctrl):
@@ -458,6 +583,137 @@ def is_shaka(p, f):
     return curled and pinky_out
 
 
+# ---------------------------------------------------------------- round 27: reading the hand in 3-D
+# MediaPipe also gives the 21 points in real-world metres around the hand's centre (hand_world_landmarks).
+# Joint ANGLES from those don't change when the hand tilts, turns or comes closer — unlike the old 2-D
+# distance ratios, which misread a tilted palm as a fist or a sideways pinch as open.
+FINGER_CHAINS = ((5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20))   # index … pinky
+DEFAULT_CAL = {"ext": [65, 65, 70, 75], "curl": [115, 115, 115, 110],   # total bend (°): straight < ext, curled > curl
+               "thumb_out": 0.85, "thumb_in": 0.70,                    # thumb tip ↔ pinky knuckle / palm length
+               "thumb_tuck": 0.30,                                     # thumb tip lying on the curled fingers
+               "pinch_on": 0.30, "pinch_off": 0.45}                    # thumb tip ↔ index tip / palm length (3-D)
+DEBUG_FLAG = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kuro-gestures-debug")
+DEBUG_LOG = DEBUG_FLAG + ".jsonl"
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _angle(u, v):
+    nu = math.sqrt(u[0] ** 2 + u[1] ** 2 + u[2] ** 2) or 1e-9
+    nv = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2) or 1e-9
+    c = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (nu * nv)
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def dist3(a, b):
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def hand_features(w):
+    """From the 3-D points: bend of each finger (°, MCP counted half), thumb reach and pinch, both ÷ palm length."""
+    palm = dist3(w[0], w[9]) or 1e-3
+    bends = []
+    for m, p, d, t in FINGER_CHAINS:
+        b = 0.5 * _angle(_sub(w[m], w[0]), _sub(w[p], w[m]))
+        b += _angle(_sub(w[p], w[m]), _sub(w[d], w[p]))
+        b += _angle(_sub(w[d], w[p]), _sub(w[t], w[d]))
+        bends.append(b)
+    thumb_bend = _angle(_sub(w[3], w[2]), _sub(w[4], w[3]))
+    thumb_reach = dist3(w[4], w[17]) / palm          # across the palm to the pinky knuckle: big only when it's out
+    thumb_tuck = min(dist3(w[4], w[j]) for j in (6, 7, 10, 11)) / palm   # resting on curled fingers (fist)
+    pinch = dist3(w[4], w[8]) / palm
+    return {"bends": bends, "thumb_bend": thumb_bend, "thumb_reach": thumb_reach, "thumb_tuck": thumb_tuck,
+            "pinch": pinch}
+
+
+def geo_fingers(feat, cal):
+    """Each finger straight (True), curled (False) or in between (None); thumb the same."""
+    out = []
+    for b, e, c in zip(feat["bends"], cal["ext"], cal["curl"]):
+        out.append(True if b < e else (False if b > c else None))
+    r, tuck = feat["thumb_reach"], feat["thumb_tuck"]
+    if r > cal["thumb_out"] and tuck > cal["thumb_tuck"] and feat["thumb_bend"] < 60:
+        thumb = True
+    elif r < cal["thumb_in"] or tuck < cal["thumb_tuck"] * 0.8:
+        thumb = False
+    else:
+        thumb = None
+    return thumb, out
+
+
+def geo_pose(feat, cal, p2d):
+    """The pose the joint angles say (or None)."""
+    thumb, (i, m, r, k) = geo_fingers(feat, cal)
+    four = (i, m, r, k)
+    if all(x is True for x in four):
+        return "palm"
+    if all(x is False for x in four):
+        if thumb is True:
+            # up or down is about gravity, so this part uses the picture: thumb tip above / below its base
+            vx, vy = p2d[4][0] - p2d[2][0], p2d[4][1] - p2d[2][1]
+            if math.hypot(vx, vy) < 0.25 * (dist(p2d[0], p2d[9]) or 1e-3):
+                return None                   # thumb pointing at the camera: can't tell up from down
+            tilt = math.degrees(math.atan2(abs(vx), -vy))   # 0 = straight up, 180 = straight down
+            if tilt < 50:
+                return "thumb-up"
+            if tilt > 130:
+                return "thumb-down"
+            return None                       # thumb sideways
+        return "fist" if thumb is False else None
+    if i is True and m is True and r is False and k is False:
+        return "victory"
+    if i is True and k is True and m is False and r is False:
+        return "rock"          # thumb in or out: the model's "ILoveYou" (🤟) is rock too — air-draw uses it
+    if thumb is True and k is True and i is False and m is False and r is False:
+        return "shaka"
+    if i is True and m is False and r is False and k is False:
+        return "point"
+    return None
+
+
+class PoseVote:
+    """Model + joint angles vote every frame; votes fade (half-life 0.12 s). A pose has to clearly win to become
+    the pose, and the current one is kept until another clearly beats it — no flicker between frames."""
+    HALF = 0.12
+
+    def __init__(self):
+        self.w = collections.defaultdict(float)
+        self.t = None
+        self.stable = None
+
+    def clear(self):
+        self.w.clear()
+        self.t = None
+        self.stable = None
+
+    def add(self, t, model_pose, model_score, geo):
+        if self.t is not None:
+            k = 0.5 ** (max(0.0, t - self.t) / self.HALF)
+            for p in list(self.w):
+                self.w[p] *= k
+        self.t = t
+        if model_pose and model_score >= 0.4:
+            self.w[model_pose] += model_score
+        if geo:
+            self.w[geo] += 1.2 if geo == "shaka" else 0.9      # the model has no shaka class
+            if geo == model_pose:
+                self.w[geo] += 0.3
+        if not geo and not (model_pose and model_score >= 0.4):
+            self.w["-"] += 1.0
+        ranked = sorted(self.w.items(), key=lambda kv: kv[1], reverse=True)
+        best, bw = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else 0.0
+        cur = self.w.get(self.stable or "-", 0.0)
+        if best != (self.stable or "-"):
+            if bw >= 2.0 and bw > 1.6 * max(second, 0.01) and bw > 1.6 * cur:
+                self.stable = None if best == "-" else best
+        elif bw < 0.8:
+            self.stable = None
+        return self.stable
+
+
 def finger_pose(f):
     """Fallback when the model says 'None'."""
     thumb, i, m, r, k = f
@@ -474,36 +730,104 @@ def finger_pose(f):
     return None
 
 
+CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def enhance(img, lut, dark):
+    """Brighten a dim picture (gamma) and, in real darkness, pull the hand's edges out (local contrast)."""
+    if lut is not None:
+        img = cv2.LUT(img, lut)
+    if dark:
+        ycc = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+        ycc[:, :, 0] = CLAHE.apply(ycc[:, :, 0])
+        img = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+    return img
+
+
 class View:
-    """One MediaPipe tracker over one part of the camera picture (whole, or the zoomed middle)."""
+    """One MediaPipe tracker over one part of the camera picture (whole, or the zoomed middle).
+    Looks for up to two hands so a second hand coming into view can't steal the one being followed."""
     def __init__(self, box, sens):
         c = 0.35 if sens == "high" else 0.45
         opts = vision.GestureRecognizerOptions(base_options=BaseOptions(model_asset_path=MODEL),
-                                               running_mode=vision.RunningMode.VIDEO, num_hands=1,
+                                               running_mode=vision.RunningMode.VIDEO, num_hands=2,
                                                min_hand_detection_confidence=c, min_hand_presence_confidence=c,
                                                min_tracking_confidence=c)
         self.rec = vision.GestureRecognizer.create_from_options(opts)
         self.box = box
         self.ts = 0
 
-    def run(self, frame, t, lut):
+    def run(self, frame, t, lut, dark=False, full=False):
+        """full = feed the crop at camera resolution (sharper hand points while tracking); otherwise the small
+        INFER_W×INFER_H copy (faster while only searching). Returns [(pts2d, world3d, gesture, score)]."""
         h, w = frame.shape[:2]
         x0, y0, x1, y1 = self.box
         crop = frame[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
-        crop = cv2.resize(crop, (INFER_W, INFER_H), interpolation=cv2.INTER_AREA)
-        if lut is not None:
-            crop = cv2.LUT(crop, lut)
+        if not full:
+            crop = cv2.resize(crop, (INFER_W, INFER_H), interpolation=cv2.INTER_AREA)
+        crop = enhance(crop, lut, dark)
         self.ts = max(self.ts + 1, int(t * 1000))
         img = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         res = self.rec.recognize_for_video(img, self.ts)
         if not res.hand_landmarks:
-            return None
-        # back to whole-picture coordinates, mirrored so it matches what you see (left is left)
-        pts = [(1 - (x0 + l.x * (x1 - x0)), y0 + l.y * (y1 - y0)) for l in res.hand_landmarks[0]]
-        g, s = "None", 0.0
-        if res.gestures and res.gestures[0]:
-            g, s = res.gestures[0][0].category_name, res.gestures[0][0].score
-        return pts, g, s
+            return []
+        hands = []
+        for i, lm in enumerate(res.hand_landmarks):
+            # back to whole-picture coordinates, mirrored so it matches what you see (left is left)
+            pts = [(1 - (x0 + l.x * (x1 - x0)), y0 + l.y * (y1 - y0)) for l in lm]
+            world = None
+            if res.hand_world_landmarks and i < len(res.hand_world_landmarks):
+                world = [(l.x, l.y, l.z) for l in res.hand_world_landmarks[i]]
+            g, s = "None", 0.0
+            if res.gestures and i < len(res.gestures) and res.gestures[i]:
+                g, s = res.gestures[i][0].category_name, res.gestures[i][0].score
+            hands.append((pts, world, g, s))
+        return hands
+
+
+def pick_hand(hands, prev_wrist):
+    """The hand we were following (nearest wrist), or the biggest = nearest the camera."""
+    if not hands:
+        return None
+    if prev_wrist is not None:
+        near = min(hands, key=lambda h: dist(h[0][0], prev_wrist))
+        if dist(near[0][0], prev_wrist) < 0.25:
+            return near
+    return max(hands, key=lambda h: dist(h[0][0], h[0][9]))
+
+
+def pick_second(hands, first):
+    """The other hand (biggest of the rest). MediaPipe sometimes reports one hand twice, so anything sitting
+    on top of the first hand doesn't count."""
+    others = [h for h in hands if h is not first
+              and dist(h[0][0], first[0][0]) > 0.08 and dist(h[0][9], first[0][9]) > 0.08]
+    return max(others, key=lambda h: dist(h[0][0], h[0][9])) if others else None
+
+
+def hand_pose(pts, world, gname, gscore, cal, vote, ft):
+    """Model + 3-D joint angles vote on the pose (2-D finger counting only without 3-D points).
+    Returns (stable pose, 3-D features or None, model pose, geometric pose)."""
+    model_pose = POSES.get(gname)
+    if world:
+        feat = hand_features(world)
+        geo = geo_pose(feat, cal, pts)
+    else:
+        feat = None
+        f = fingers(pts)
+        geo = "shaka" if is_shaka(pts, f) else finger_pose(f)
+    return vote.add(ft, model_pose, gscore, geo), feat, model_pose, geo
+
+
+def pinch_dist(pts, feat):
+    return feat["pinch"] if feat else dist(pts[4], pts[8]) / (dist(pts[0], pts[9]) or 1e-3) * 0.75
+
+
+def load_cal(conf):
+    cal = dict(DEFAULT_CAL)
+    for k, v in (conf.get("calibration") or {}).items():
+        if k in cal and type(v) is type(cal[k]) and (not isinstance(v, list) or len(v) == 4):
+            cal[k] = v
+    return cal
 
 
 def main():
@@ -522,6 +846,7 @@ def main():
     shell = Shell()
     modes = Modes()
     guard = Guard(shell)
+    face = Face(shell)
     hands_on = None                # last applied hands mode (None = not yet)
     lock = LockWatch()
     lock.start()
@@ -537,7 +862,19 @@ def main():
     pinching = False
     fx, fy = OneEuro(), OneEuro()
     wrist = collections.deque()    # (t, x, y)
-    votes = collections.deque(maxlen=5)
+    vote = PoseVote()
+    vote2 = PoseVote()             # the second hand's pose
+    # two-hand mode: first = when the 2nd hand appeared, seen = last time it was seen, p1/p2 = pinch states,
+    # spread = distance between the two pinch points last frame, hold = when ✋✋ started
+    two = {"first": None, "seen": 0.0, "p1": False, "p2": False, "spread": None, "hold": None, "fired": False,
+           "anchor": None, "drawn": False}
+    cal = load_cal(conf)
+    prev_wrist = None
+    ptr_hist = collections.deque()  # (t, tx, ty) raw pointer targets, for the click lock
+    pinch_off = (0.0, 0.0)          # pointer offset held during a pinch, so pinching never moves the dot
+    release_until = 0.0
+    release_pos = (0.5, 0.5)
+    debug_on, debug_t, debug_f = False, 0.0, None
     hold = {"pose": None, "since": 0.0, "x": 0, "y": 0, "ax": 0, "ay": 0, "fired": False, "dial": False, "ly": 0}
     pending = None                 # (name, fire_at) — vertical swipes wait to see the hand is still there
     cooldown_until = 0.0
@@ -556,36 +893,45 @@ def main():
             status, status_t = key, now_
 
     def reset_hand():
-        nonlocal pinching, pending
+        nonlocal pinching, pending, prev_wrist
+        prev_wrist = None
         pinching = False
         pending = None
         fx.reset(), fy.reset()
         wrist.clear()
-        votes.clear()
+        vote.clear()
+        ptr_hist.clear()
         hold.update(pose=None, dial=False)
         cam.tracking = False
+        vote2.clear()
+        two.update(first=None, p1=False, p2=False, spread=None, hold=None, fired=False, anchor=None, drawn=False)
 
     while running:
         modes.refresh()
         shell.own("org.bapirlo.GesturesCam", modes.hands)
         shell.own("org.bapirlo.KuroGuardCam", modes.guard)
+        shell.own("org.bapirlo.KuroSenseCam", modes.head or modes.look)
         if not modes.guard:
             guard.reset()
+        if not modes.look:
+            face.reset()
         if hands_on != modes.hands:
             if hands_on:                                  # hands just switched off
                 shell.call("Lost")
                 reset_hand()
                 shell.call("Status", "ss", "off", "")
             hands_on = modes.hands
-        cam.idle_fps = IDLE_FPS if modes.hands else GUARD_FPS
-        if not modes.hands and not modes.guard:           # nothing to do (bapirlo-* stops the service soon)
+        cam.idle_fps = 30 if modes.head else (IDLE_FPS if modes.hands else GUARD_FPS)
+        if not modes.any:                                 # nothing to do (bapirlo-* stops the service soon)
             cam.want_open = False
             time.sleep(0.5)
             continue
 
-        if conf.refresh() and conf.get("sensitivity", "normal") != sens:
-            sens = conf.get("sensitivity", "normal")
-            views = [View((0, 0, 1, 1), sens), View(ZOOM_BOX, sens)]
+        if conf.refresh():
+            cal = load_cal(conf)
+            if conf.get("sensitivity", "normal") != sens:
+                sens = conf.get("sensitivity", "normal")
+                views = [View((0, 0, 1, 1), sens), View(ZOOM_BOX, sens)]
 
         if lock.locked:
             if not paused:
@@ -594,6 +940,7 @@ def main():
                 shell.call("Lost")
                 reset_hand()
                 guard.reset()
+                face.reset()
                 set_status("paused", "Screen locked — camera off")
             time.sleep(0.5)
             continue
@@ -613,6 +960,7 @@ def main():
         small = cv2.resize(frame, (80, 45), interpolation=cv2.INTER_NEAREST)
         luma = float(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).mean())
         dark = luma < 38
+        dim = luma < 55                            # local-contrast boost below this
         lut = None
         if luma < 90:
             g = round(max(0.45, min(1.0, (luma / 90) ** 0.8)), 2)
@@ -622,6 +970,8 @@ def main():
 
         if modes.guard:
             guard.step(frame, lut, now)
+        if modes.head or modes.look:
+            face.step(frame, lut, now, modes.head, modes.look)
         if not modes.hands:
             continue
 
@@ -640,7 +990,9 @@ def main():
         else:
             vi = view_i
         t0 = time.monotonic()
-        res = views[vi].run(frame, ft, lut)
+        # searching: the small fast picture; tracking: full camera resolution = sharper, steadier hand points
+        hands = views[vi].run(frame, ft, lut, dim, full=not idle)
+        res = pick_hand(hands, prev_wrist)
         if PROFILE:
             prof["n"] += 1
             prof["infer"] += time.monotonic() - t0
@@ -662,7 +1014,8 @@ def main():
                            "It's dark — turn a light on" if dark else "Raise a hand in front of the camera")
             continue
 
-        pts, gname, gscore = res
+        pts, world, gname, gscore = res
+        prev_wrist = pts[0]
         if idle:
             hand_since = now
             view_i = vi
@@ -670,24 +1023,34 @@ def main():
         cam.tracking = True
         size = dist(pts[0], pts[9])                # wrist → middle knuckle: how big (close) the hand is
 
-        # pose: model first, finger counting as a fallback, shaka from the points; then a 5-frame vote
-        f = fingers(pts)
-        if is_shaka(pts, f):
-            pose = "shaka"
-        else:
-            pose = POSES.get(gname) if gscore > 0.5 else None
-            if pose is None:
-                pose = finger_pose(f)
-        votes.append(pose)
-        top, n = collections.Counter(votes).most_common(1)[0]
-        stable = top if n >= 3 else None
+        # second hand → two-hand mode after TWO_ENTER s; ends TWO_LOST s after the second hand goes
+        sec = pick_second(hands, res)
+        if sec is not None:
+            two["seen"] = now
+            if two["first"] is None:
+                two["first"] = now
+        elif two["first"] is not None and now - two["seen"] > TWO_LOST:
+            vote2.clear()
+            two.update(first=None, p1=False, p2=False, spread=None, hold=None, fired=False, anchor=None)
+            if two["drawn"]:
+                shell.call("Hand2", "adsd", [], "", 0.0)
+                two["drawn"] = False
+            wrist.clear()                          # the hand that stays mustn't count as a swipe
+            hand_since = now
+        two_on = two["first"] is not None and now - two["first"] >= TWO_ENTER
 
-        # pinch, with hysteresis, never while making a fist / thumbs / shaka pose
-        pd = dist(pts[4], pts[8]) / size
-        if stable in ("fist", "thumb-up", "thumb-down", "shaka"):
-            pinching = False
+        # pose: the model and the 3-D joint angles both vote (PoseVote); old 2-D finger counting only if
+        # MediaPipe gave no 3-D points
+        stable, feat, model_pose, geo = hand_pose(pts, world, gname, gscore, cal, vote, ft)
+
+        # pinch (3-D thumb↔index distance, so it works with the hand turned), with hysteresis, never while
+        # making a fist / thumbs / shaka pose
+        was_pinching = pinching
+        pd = pinch_dist(pts, feat)
+        if stable in ("fist", "thumb-up", "thumb-down", "shaka") or two_on:
+            pinching = False                       # two hands: pinches zoom instead of clicking
         else:
-            pinching = pd < 0.30 if not pinching else pd < 0.48
+            pinching = pd < cal["pinch_on"] if not pinching else pd < cal["pinch_off"]
 
         # pointer: index tip (or the pinch point). The box that maps to the whole screen shrinks when
         # you're further away, so you never have to reach far.
@@ -698,8 +1061,49 @@ def main():
         cx, cy = 0.5, 0.44
         tx = min(1, max(0, (px - (cx - bw / 2)) / bw))
         ty = min(1, max(0, (py - (cy - bh / 2)) / bh))
+        # click lock: closing a pinch drags the index tip a little, and the dot switches to the pinch point.
+        # Both would make a click land off target — so at the moment the pinch closes, the dot goes back to
+        # where it was ~0.12 s earlier (before the fingers moved) and the pinch keeps that offset while you
+        # carry. Opening the pinch holds the dot still for 0.15 s for the same reason.
+        ptr_hist.append((ft, tx, ty))
+        while ptr_hist and ft - ptr_hist[0][0] > 0.4:
+            ptr_hist.popleft()
+        if pinching and not was_pinching:
+            before = next((h for h in reversed(ptr_hist) if ft - h[0] >= 0.12), ptr_hist[0])
+            pinch_off = (before[1] - tx, before[2] - ty)
+        elif not pinching and was_pinching:
+            release_until = ft + 0.15
+            release_pos = (min(1, max(0, tx + pinch_off[0])), min(1, max(0, ty + pinch_off[1])))
+            pinch_off = (0.0, 0.0)
+        if pinching:
+            tx, ty = min(1, max(0, tx + pinch_off[0])), min(1, max(0, ty + pinch_off[1]))
+        elif ft < release_until:
+            tx, ty = release_pos
+        if pinching != was_pinching:                       # jump straight there, no smoothing lag
+            fx.reset(), fy.reset()
         sx, sy = fx(tx, ft), fy(ty, ft)
         shell.call("Pointer", "ddbs", float(sx), float(sy), bool(pinching), stable or "")
+
+        # accuracy test / calibration (bapirlo-gestures test): one line per frame while the flag file exists
+        if now - debug_t > 1:
+            debug_t = now
+            try:   # the test keeps touching the flag; a stale one (test crashed) never leaves gestures muted
+                want = time.time() - os.stat(DEBUG_FLAG).st_mtime < 20
+            except OSError:
+                want = False
+            if want and not debug_on:
+                debug_f = open(DEBUG_LOG, "a", buffering=1)
+            elif not want and debug_on and debug_f:
+                debug_f.close()
+                debug_f = None
+            debug_on = want
+            shell.muted = want
+        if debug_on and debug_f:
+            debug_f.write(json.dumps({"t": round(ft, 3), "model": model_pose, "score": round(gscore, 2),
+                                      "geo": geo, "stable": stable, "pinch": bool(pinching), "hands": len(hands), "two": bool(two_on),
+                                      "p2d": [[round(x, 4), round(y, 4)] for x, y in pts],
+                                      "feat": {k: (round(v, 3) if isinstance(v, float) else [round(x, 1) for x in v])
+                                               for k, v in feat.items()} if feat else None}) + "\n")
 
         # hints
         xs = [p[0] for p in pts]
@@ -712,6 +1116,63 @@ def main():
         elif dark:
             hint = "It's dark — a light helps"
         set_status("tracking", hint)
+
+        # two hands: draw the second one, and do two-hand gestures instead of the one-hand ones
+        if two_on:
+            flat = [float(c) for p in pts for c in p]
+            progress, mode = 0.0, "two"
+            if sec is not None:
+                pts2, world2, g2, s2 = sec
+                stable2, feat2, _, _ = hand_pose(pts2, world2, g2, s2, cal, vote2, ft)
+                size2 = dist(pts2[0], pts2[9]) or 1e-3
+                pd2 = pinch_dist(pts2, feat2)
+                two["p1"] = pd < (cal["pinch_off"] if two["p1"] else cal["pinch_on"]) and stable != "fist"
+                two["p2"] = pd2 < (cal["pinch_off"] if two["p2"] else cal["pinch_on"]) and stable2 != "fist"
+
+                # 🤏🤏 pinch both, pull apart / push together = zoom dial
+                if two["p1"] and two["p2"]:
+                    c1 = ((pts[4][0] + pts[8][0]) / 2, (pts[4][1] + pts[8][1]) / 2)
+                    c2 = ((pts2[4][0] + pts2[8][0]) / 2, (pts2[4][1] + pts2[8][1]) / 2)
+                    d = dist(c1, c2)
+                    if two["spread"] is None:
+                        two["spread"] = d
+                        shell.call("Dial", "sd", "spread", 0.0)
+                    else:
+                        delta = (d - two["spread"]) / ((size + size2) / 2)   # + = hands moved apart
+                        if abs(delta) > 0.015:
+                            shell.call("Dial", "sd", "spread", float(delta))
+                            two["spread"] = d
+                    mode = "dial"
+                    two["hold"] = None
+                else:
+                    two["spread"] = None
+
+                # ✋✋ both palms still = two-palms
+                if mode != "dial" and stable == "palm" and stable2 == "palm":
+                    anchor = (pts[0][0], pts[0][1], pts2[0][0], pts2[0][1])
+                    if two["hold"] is None:
+                        two.update(hold=now, anchor=anchor)
+                    moved = max(math.hypot(anchor[0] - two["anchor"][0], anchor[1] - two["anchor"][1]),
+                                math.hypot(anchor[2] - two["anchor"][2], anchor[3] - two["anchor"][3]))
+                    if moved / ((size + size2) / 2) > 0.45:
+                        two.update(hold=now, anchor=anchor)            # moving → start again
+                    elif not two["fired"] and now > cooldown_until:
+                        progress = min(1.0, (now - two["hold"]) / TWO_HOLD)
+                        if progress >= 1:
+                            shell.call("Gesture", "s", "two-palms")
+                            two["fired"] = True
+                            cooldown_until = now + COOLDOWN
+                            progress = 0.0
+                elif mode != "dial":
+                    two.update(hold=None, fired=False)
+
+                shell.call("Hand2", "adsd", [float(c) for p in pts2 for c in p], stable2 or "", float(progress))
+                two["drawn"] = True
+            # one-hand gestures start fresh when the second hand goes
+            hold.update(pose=None, dial=False)
+            pending = None
+            shell.call("Hand", "adsdss", flat, stable or "", float(progress), mode, hint)
+            continue
 
         # swipes (open hand, fast, after the hand has settled); ✌ flicks use the same wrist trail
         wx, wy = pts[0]
@@ -784,6 +1245,7 @@ def main():
     cam.want_open = False
     cam.join(timeout=2)
     guard.reset()
+    face.reset()
     shell.call("Lost")
     shell.call("Status", "ss", "off", "")
 

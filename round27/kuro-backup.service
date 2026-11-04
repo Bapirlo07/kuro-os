@@ -1,0 +1,8 @@
+[Unit]
+Description=Kuro Backup — save the whole Kuro setup (kuro backup)
+
+[Service]
+Type=oneshot
+ExecStart=%h/bapirlo-os/bin/kuro-backup now
+Nice=19
+IOSchedulingClass=idle

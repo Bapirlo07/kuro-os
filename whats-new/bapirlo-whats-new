@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-ROUND = "round23"
+ROUND = "round25"
 APP_ID = "os.bapirlo.WhatsNew"
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 BIN = os.path.join(ROOT, "bin")
@@ -104,6 +104,62 @@ COSMOS = "bapirlo-cosmos"
 
 def cosmos(*args):
     return lambda: launch([b(COSMOS), *args])
+
+
+SENSE = "bapirlo-sense"
+
+
+def sense(*args):
+    return lambda: launch([b(SENSE), *args])
+
+
+def features25(self):
+    cam = "Uses the webcam (its light stays on). Nothing is recorded or sent anywhere."
+    return [
+        ("1", "Head-tracked 3D wallpaper",
+         "The 3D depth wallpaper follows your HEAD instead of the mouse. Lean left and right and near things slide "
+         "against far ones, as if the screen were a window into the picture.",
+         ["Switch it on, then lean · it re-centres itself to how you sit"],
+         [], "bapirlo-sense head", cam),
+        ("2", "Air grab",
+         "Pinch in the air to grab the window under the red dot, move your hand to carry it, open your hand to drop "
+         "it. Fling it hard into a corner and the black hole eats it.",
+         ["Air gestures: 🤏 pinch + move · fling = throw"],
+         [], "bapirlo-gestures", "Part of Air gestures — this switch turns those on."),
+        ("3", "Look-aware",
+         "Look away for two seconds and videos pause and the screen dims. Look back and they resume. Music players "
+         "keep playing. Optional: hold your head toward a window to focus it.",
+         ["Look-to-focus: bapirlo-sense focus on (experimental)"],
+         [("Try it (4 s)", sense("demo", "away"), True)], "bapirlo-sense look", cam),
+        ("4", "Liquid Glass",
+         "The top bar pills, the dock and the Dynamic Island are made of glass: their edges bend and split the "
+         "wallpaper behind them like a thick lens, with a bright rim lit from the top-left.",
+         ["Darker: bapirlo-sense tint 0.25 · stronger lens: bapirlo-sense bend 1.5"],
+         [], "bapirlo-sense glass", None),
+        ("5", "Music-reactive Kuro",
+         "While music plays, the glass rims, dock and aurora sky pulse to the kick drum in the album art's colour, "
+         "and the clock pill swells on every beat.",
+         ["Starts by itself when something plays"],
+         [("Show a beat", sense("demo", "beat"), True)], "bapirlo-sense pulse",
+         "It only listens to what the speakers play, never the microphone."),
+        ("6", "Keyboard RGB sync",
+         "Keyboard lighting that follows the wallpaper and the music. Your MSI keyboard's light chip (MysticLight "
+         "MS-1603) isn't supported by OpenRGB yet, so this one starts with a safe read-only test.",
+         ["sudo bash ~/bapirlo-os/round25/2510-rgb-probe.sh"],
+         [], None, "Waiting on the probe result."),
+        ("7", "Spatial sounds",
+         "Sounds come from where things happen: a notification from the app's window, soft blips where windows "
+         "open and close, a whoosh toward the side you switch workspaces to.",
+         ["Headphones make it obvious"],
+         [("Left", sense("demo", "sound-left"), False), ("Right", sense("demo", "sound-right"), True)],
+         "bapirlo-sense spatial", None),
+        ("8", "Hey Kuro",
+         "Offline voice commands: \"open Spotify\", \"next song\", \"volume to 40\", \"dark mode\", \"workspace 2\", "
+         "\"what's using the battery\", or any Kuro command by name. Speech never leaves the laptop.",
+         [("Super", "+", "K"), " · talk · it stops when you pause"],
+         [("Listen now", sense("listen"), True)], "bapirlo-sense voice",
+         "Wake word \"Hey Kuro\" without a key: bapirlo-sense wake on (keeps the mic open)."),
+    ]
 
 
 def features(self):
@@ -270,18 +326,22 @@ class WhatsNew(Adw.Application):
 
         hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         hero.add_css_class("hero")
-        hero.append(self.label("KURO OS · ROUNDS 22 + 23 · COSMOS & FLOW", "brand"))
+        hero.append(self.label("KURO OS · ROUND 25 · KURO SENSE", "brand"))
         hero.append(self.label("What's new", "title"))
-        hero.append(self.label("Eleven cosmic upgrades and ten that get things done faster. Everything with a "
-                               "switch is on except the aurora sky — flip any of them here.", "sub", wrap=True))
+        hero.append(self.label("Kuro now sees, hears and feels: head-tracked 3D, liquid glass, music that moves the "
+                               "desktop and offline voice. The camera parts are off until you switch them on.",
+                               "sub", wrap=True))
         page.append(hero)
 
         self.switches = {}
         self._syncing = False
-        page.append(self.label("COSMOS", "brand", margin_top=6))
+        page.append(self.label("SENSE · ROUND 25", "brand", margin_top=6))
+        for num, title, what, how, buttons, service, note in features25(self):
+            page.append(self.card(num, title, what, how, buttons, service, note))
+        page.append(self.label("COSMOS · ROUND 22", "brand", margin_top=14))
         for num, title, what, how, buttons, service, note in features(self):
             page.append(self.card(num, title, what, how, buttons, service, note))
-        page.append(self.label("FLOW", "brand", margin_top=14))
+        page.append(self.label("FLOW · ROUND 23", "brand", margin_top=14))
         for num, title, what, how, buttons, service, note in features23(self):
             page.append(self.card(num, title, what, how, buttons, service, note))
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro Voice — offline speech for "Hey Kuro" (Kuro Sense starts it on first use)
+PartOf=graphical-session.target
+
+[Service]
+Environment=OMP_NUM_THREADS=4
+ExecStart=%h/.local/share/bapirlo/voice-venv/bin/python -I %h/bapirlo-os/round25/helpers/kuro-voice.py
+Restart=on-failure
+RestartSec=5
+Nice=2

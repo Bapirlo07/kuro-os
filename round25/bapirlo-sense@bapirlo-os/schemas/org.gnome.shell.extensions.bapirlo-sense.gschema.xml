@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bapirlo-sense" path="/org/gnome/shell/extensions/bapirlo-sense/">
+    <!-- camera jobs (head / look) are switched in ~/.config/bapirlo/camera.json by `bapirlo-sense`;
+         these keys only say what the shell does with what the camera reports -->
+    <key name="head-strength" type="d"><default>1.0</default><summary>How far the 3D wallpaper follows your head</summary></key>
+    <key name="look-pause" type="b"><default>true</default><summary>Look away: pause videos (not music players)</summary></key>
+    <key name="look-dim" type="b"><default>true</default><summary>Look away: dim the screen</summary></key>
+    <key name="look-focus" type="b"><default>false</default><summary>Hold your head toward a window to focus it (experimental)</summary></key>
+    <key name="look-away-ms" type="i"><default>2000</default><summary>How long you look away before it reacts</summary></key>
+    <key name="glass" type="b"><default>true</default><summary>Liquid Glass on the top bar, dock and island</summary></key>
+    <key name="glass-strength" type="d"><default>1.0</default><summary>How strongly the glass edges bend the picture</summary></key>
+    <key name="glass-tint" type="d"><default>0.15</default><summary>How dark the glass is (readability)</summary></key>
+    <key name="pulse" type="b"><default>true</default><summary>Music-reactive glow while music plays</summary></key>
+    <key name="spatial" type="b"><default>true</default><summary>UI sounds come from where things happen</summary></key>
+    <key name="spatial-windows" type="b"><default>true</default><summary>Soft sounds for window open / close / minimise</summary></key>
+    <key name="voice" type="b"><default>true</default><summary>Voice commands (Super+K, offline)</summary></key>
+    <key name="voice-key" type="as"><default><![CDATA[['<Super>k']]]></default><summary>Talk to Kuro</summary></key>
+    <key name="wake-word" type="b"><default>false</default><summary>Listen for "Hey Kuro" all the time (uses more battery)</summary></key>
+  </schema>
+</schemalist>

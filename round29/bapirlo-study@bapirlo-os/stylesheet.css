@@ -1,0 +1,36 @@
+/* Kuro Study — ink #0E0A0D · crimson #E11D2E · ember #FF4655 · sakura #F08AA4 · paper #F2E9EC */
+.ks-chip { spacing: 4px; }
+.ks-label { font-weight: 700; font-size: 10pt; color: #F2E9EC; }
+.ks-label.soon { color: #F08AA4; }
+.ks-label.live { color: #FF4655; }
+.ks-label.urgent { color: #FF4655; }
+
+.ks-menu { min-width: 380px; }
+.ks-head { font-size: 8.5pt; font-weight: 800; letter-spacing: 1px; color: #E11D2E; padding-top: 8px; padding-bottom: 2px; }
+.ks-title .ks-row-text { font-weight: 800; font-size: 11pt; }
+.ks-row { spacing: 10px; }
+.ks-row-text { font-size: 10pt; }
+.ks-row-side { font-size: 9pt; color: rgba(242, 233, 236, 0.6); font-feature-settings: "tnum"; }
+.ks-dot { width: 8px; height: 8px; border-radius: 4px; }
+.ks-past { opacity: 0.45; }
+.ks-dim .ks-row-text, .ks-dim .ks-row-side { color: rgba(242, 233, 236, 0.55); }
+.ks-live .ks-row-text { font-weight: 700; }
+.ks-live .ks-row-side, .ks-urgent .ks-row-side { color: #FF4655; font-weight: 700; }
+
+.ks-dialog .modal-dialog-content-box { spacing: 12px; padding: 22px 24px 10px; }
+.ks-dialog { min-width: 520px; }
+.ks-dialog-title { font-size: 15pt; font-weight: 800; color: #F2E9EC; }
+.ks-entry { width: 520px; padding: 9px 12px; border-radius: 10px; }
+.ks-entry.multi { min-height: 96px; }
+.ks-chips { spacing: 6px; }
+.ks-chip-btn { padding: 4px 10px; border-radius: 99px; border: 1.5px solid; font-size: 9pt; font-weight: 700; color: rgba(242, 233, 236, 0.75); }
+.ks-chip-btn:hover, .ks-chip-btn:focus { color: #F2E9EC; }
+.ks-chip-btn.on { color: #F2E9EC; }
+.ks-hint { font-size: 8.5pt; color: rgba(242, 233, 236, 0.5); }
+.ks-hint.ks-hint-bad { color: #FF4655; }
+
+/* Focus Lock card */
+.ks-lock-card { background-color: rgba(14, 10, 13, 0.94); border: 1.5px solid #E11D2E; border-radius: 16px;
+  padding: 12px 22px; spacing: 2px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); }
+.ks-lock-title { font-size: 12pt; font-weight: 800; color: #F2E9EC; }
+.ks-lock-body { font-size: 9.5pt; color: rgba(242, 233, 236, 0.7); }

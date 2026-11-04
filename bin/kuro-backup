@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Kuro OS — whole-setup backup + one-command restore.
+
+  kuro backup                  save the Kuro setup now (kuro-backup.timer does it every night)
+  kuro backup list             the saved backups
+  kuro restore-all [FILE]      put a backup back (newest if no FILE) — on this laptop or a fresh install
+  kuro backup where DIR        keep backups in DIR too (e.g. a USB drive), "where off" to stop
+
+What's in one (≈ 300 MB, zstd): every setting (dconf — GNOME + all extensions' settings), all extensions
+(Kuro + downloaded), ~/.config/bapirlo, your user services, wallpapers, themes, icons, sounds, app overrides,
+autostart, and the list of installed packages (official + AUR) so a fresh install can get them back.
+Not in it: the big re-downloadable parts (Python venvs, AI models — `gestures/setup.sh` etc. rebuild them),
+caches, your documents (that's what Timeshift / Drive are for).
+Backups: ~/.local/share/bapirlo/backups (only you can read them; they hold your AirPlay key and RustDesk id).
+Keeps the newest 2 (setting "keep" in ~/.config/bapirlo/backup.json).
+"""
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+HOME = os.path.expanduser("~")
+DEST = os.path.join(HOME, ".local/share/bapirlo/backups")
+CONF = os.path.join(HOME, ".config/bapirlo/backup.json")
+PATHS = [".config/bapirlo", ".config/systemd/user", ".local/share/gnome-shell/extensions", ".local/share/backgrounds",
+         ".themes", ".local/share/icons", ".icons", "Pictures/wallpapers", ".local/share/bapirlo/theme-studio",
+         ".config/gtk-3.0", ".config/gtk-4.0", ".local/share/applications", ".config/autostart", ".config/fastfetch",
+         ".config/MangoHud", ".local/share/sounds", ".config/easyeffects", ".config/hypr", ".config/spicetify",
+         ".config/ArcMenu", ".local/share/nautilus/scripts", ".config/ddterm"]
+SKIP_NAMES = {"__pycache__", "node_modules", ".git", "gesture-venv", "voice-venv", "depth-venv", "cache"}
+
+
+def conf():
+    try:
+        with open(CONF) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_conf(c):
+    os.makedirs(os.path.dirname(CONF), exist_ok=True)
+    with open(CONF + ".tmp", "w") as f:
+        json.dump(c, f, indent=1)
+    os.replace(CONF + ".tmp", CONF)
+
+
+def run(*cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, p.stdout
+
+
+def backups(d=DEST):
+    if not os.path.isdir(d):
+        return []
+    return sorted((os.path.join(d, f) for f in os.listdir(d) if f.startswith("kuro-") and f.endswith(".tar.zst")),
+                  reverse=True)
+
+
+def human(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {u}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def make():
+    os.makedirs(DEST, mode=0o700, exist_ok=True)
+    os.chmod(DEST, 0o700)
+    c = conf()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "dconf.ini"), "w") as f:
+            f.write(run("dconf", "dump", "/")[1])
+        with open(os.path.join(tmp, "packages.txt"), "w") as f:
+            f.write(run("pacman", "-Qqen")[1])
+        with open(os.path.join(tmp, "aur.txt"), "w") as f:
+            f.write(run("pacman", "-Qqem")[1])
+        units = sorted(os.path.basename(p) for p in os.listdir(os.path.join(HOME, ".config/systemd/user"))
+                       if p.endswith((".service", ".timer", ".path"))) if os.path.isdir(os.path.join(HOME, ".config/systemd/user")) else []
+        enabled = [u for u in units if run("systemctl", "--user", "is-enabled", u)[1].strip() == "enabled"]
+        present = [p for p in PATHS if os.path.exists(os.path.join(HOME, p))]
+        meta = {"time": time.time(), "host": os.uname().nodename, "user": os.environ.get("USER"),
+                "gnome": run("gnome-shell", "--version")[1].strip(), "kernel": os.uname().release,
+                "paths": present, "enabled_units": enabled,
+                "repo_commit": run("git", "-C", os.path.join(HOME, "bapirlo-os"), "rev-parse", "--short", "HEAD")[1].strip()}
+        with open(os.path.join(tmp, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=1)
+        raw = os.path.join(tmp, "b.tar")
+
+        def skip(ti):
+            parts = set(ti.name.split("/"))
+            if parts & SKIP_NAMES or ti.name.endswith((".kuro-new", ".tmp")):
+                return None
+            return ti
+        with tarfile.open(raw, "w") as t:
+            for n in ("meta.json", "dconf.ini", "packages.txt", "aur.txt"):
+                t.add(os.path.join(tmp, n), arcname=n)
+            for p in present:
+                t.add(os.path.join(HOME, p), arcname="home/" + p, filter=skip)
+        out = os.path.join(DEST, f"kuro-{stamp}.tar.zst")
+        fd = os.open(out + ".part", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fo:
+            subprocess.run(["zstd", "-q", "-T0", "-6", "-c", raw], stdout=fo, check=True)
+        os.replace(out + ".part", out)
+    keep = int(c.get("keep", 2))
+    for old in backups()[keep:]:
+        os.remove(old)
+    extra = c.get("where")
+    if extra and os.path.isdir(extra):
+        shutil.copy2(out, extra)
+        for old in backups(extra)[keep:]:
+            os.remove(old)
+    print(f"saved {out} ({human(os.path.getsize(out))})" + (f" + copy in {extra}" if extra and os.path.isdir(extra) else ""))
+    return out
+
+
+def listing():
+    rows = backups()
+    c = conf()
+    if c.get("where") and os.path.isdir(c["where"]):
+        rows += [b for b in backups(c["where"])]
+    if not rows:
+        print("No backups yet — `kuro backup` makes one.")
+    for b in rows:
+        print(f"  {os.path.basename(b)}  {human(os.path.getsize(b))}  {os.path.dirname(b)}")
+
+
+def restore(args):
+    yes = "--yes" in args
+    args = [a for a in args if a != "--yes"]
+    src = args[0] if args else (backups()[0] if backups() else None)
+    if not src or not os.path.exists(src):
+        print("No backup found. Give the file: kuro restore-all /path/kuro-….tar.zst")
+        return 1
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(f"zstd -q -dc '{src}' | tar -x -C '{tmp}'", shell=True, check=True)
+        with open(os.path.join(tmp, "meta.json")) as f:
+            meta = json.load(f)
+        when = datetime.datetime.fromtimestamp(meta["time"]).strftime("%a %d %b %Y %H:%M")
+        print(f"Backup from {when} on {meta['host']} ({meta['gnome']}): {len(meta['paths'])} folders, "
+              f"{len(meta['enabled_units'])} services.")
+        if not yes:
+            if input("Replace your current setup with it? Current files are kept aside first. [y/N] ").strip().lower() != "y":
+                print("Nothing changed.")
+                return 0
+        aside = os.path.join(HOME, "theme-backups", "before-restore-" + time.strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(aside, exist_ok=True)
+        with open(os.path.join(aside, "dconf.ini"), "w") as f:
+            f.write(run("dconf", "dump", "/")[1])
+        for p in meta["paths"]:
+            dst = os.path.join(HOME, p)
+            if os.path.exists(dst):
+                os.makedirs(os.path.dirname(os.path.join(aside, p)), exist_ok=True)
+                shutil.move(dst, os.path.join(aside, p))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(os.path.join(tmp, "home", p), dst)
+        with open(os.path.join(tmp, "dconf.ini")) as f:
+            subprocess.run(["dconf", "load", "/"], stdin=f)
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+        for u in meta["enabled_units"]:
+            subprocess.run(["systemctl", "--user", "enable", u], capture_output=True)
+        have = set(run("pacman", "-Qq")[1].split())
+        missing = [p for p in open(os.path.join(tmp, "packages.txt")).read().split() if p not in have]
+        missing_aur = [p for p in open(os.path.join(tmp, "aur.txt")).read().split() if p not in have]
+        if missing or missing_aur:
+            lst = os.path.join(aside, "missing-packages.txt")
+            with open(lst, "w") as f:
+                f.write("\n".join(missing + missing_aur) + "\n")
+            print(f"\n{len(missing)} official + {len(missing_aur)} AUR packages from the backup aren't installed here.")
+            print(f"  install them:  paru -S --needed - < {lst}")
+        if not os.path.isdir(os.path.join(HOME, "bapirlo-os")):
+            print("  ~/bapirlo-os is missing — git clone https://github.com/Bapirlo07/kuro-os ~/bapirlo-os")
+        if not os.path.isdir(os.path.join(HOME, ".local/share/bapirlo/gesture-venv")):
+            print("  air gestures / camera: bash ~/bapirlo-os/gestures/setup.sh")
+    print(f"\nRestored. Your previous files are in {aside}")
+    print("Log out and back in to load everything.")
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "now"
+    if cmd in ("now", "backup"):
+        make()
+    elif cmd == "list":
+        listing()
+    elif cmd == "restore":
+        return restore(a[1:])
+    elif cmd == "where":
+        c = conf()
+        if len(a) < 2 or a[1] == "off":
+            c.pop("where", None)
+            print("Backups only in", DEST)
+        else:
+            c["where"] = os.path.abspath(os.path.expanduser(a[1]))
+            print("Backups also copied to", c["where"])
+        save_conf(c)
+    else:
+        print(__doc__)
+        return 0 if cmd in ("-h", "--help", "help") else 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

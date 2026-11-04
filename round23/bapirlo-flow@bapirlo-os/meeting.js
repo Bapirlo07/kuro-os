@@ -1,7 +1,7 @@
 // Kuro Meeting mode — switches itself on when a call starts: the camera comes on, or an app (not Kuro's own
 // knock / gesture helpers) keeps the microphone open for 10 s. While it's on:
 //   · notification banners are held (they still go to the list), music that was playing is paused,
-//   · the desk widgets and the Kuro creature step out of the way,
+//   · the desk widgets step out of the way,
 //   · a small "● In a meeting · 12:04" timer sits under the bar ("Not a meeting" turns it off until the call ends).
 // 20 s after the camera and mic are both free, everything goes back exactly as it was (music resumes).
 import Clutter from 'gi://Clutter';
@@ -150,11 +150,6 @@ export class Meeting {
             desk.set_boolean('widgets', false);
             this._desk = desk;
         }
-        // Kuro creature
-        const pet = (await run(['bapirlo-pet', 'status'])).trim();
-        saved.pet = /^Kuro is out/.test(pet);
-        if (saved.pet)
-            run(['bapirlo-pet', 'hide']);
         // music
         saved.paused = [];
         const names = await dbus('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ListNames', null, '(as)');
@@ -179,8 +174,6 @@ export class Meeting {
             new Gio.Settings({schema_id: 'org.gnome.desktop.notifications'}).set_boolean('show-banners', s.banners);
         if (s.widgets !== undefined)
             this._desk?.set_boolean('widgets', s.widgets);
-        if (s.pet)
-            run(['bapirlo-pet', 'show']);
         for (const n of s.paused ?? [])
             dbus(n, '/org/mpris/MediaPlayer2', 'org.mpris.MediaPlayer2.Player', 'Play', null, null);
         this._saved = null;

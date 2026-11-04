@@ -105,7 +105,7 @@ Commands in `code` go in a terminal (Alacritty, or the drop-down one on [[Super+
 | **Bitwarden** | Password manager | Start menu → Bitwarden |
 | **Downloads tidy** | Once a day sorts loose files in Downloads into folders; old installers and duplicate files go to the Bin | Automatic · `bapirlo-tidy --dupes` to clear duplicates now |
 | **Google Drive** | Drive as a folder (`~/GoogleDrive`) | `bapirlo-gdrive setup` once |
-| **Picture-in-picture** | PiP windows from Chrome/Firefox stay on top and remember their place | Automatic |
+| **Picture-in-picture** | PiP windows from Chrome/Firefox are pinned (on top, on every workspace) and remember their place. Unpin / pin again — works on any window | Automatic · [[Super+Alt+K]] pin/unpin the focused window · window menu → *Always on Top* |
 | **Pop-out (any window)** | A live mini copy of any window (video, call, game, build log) floats in a corner above everything, on every workspace — minimise the original or leave its workspace and it keeps playing. Drag = move (snaps to a corner), scroll = size, Ctrl+scroll = see-through, double-click = go to the window, middle-click / ✕ = close. Hidden in the overview and when locked | [[Super+Alt+I]] on the window (again closes it) · window menu ([[Alt+Space]] or right-click the title bar) → *Picture in Picture* |
 | **Caffeine** | Stop the screen from sleeping (e.g. during a lecture video) | Control Centre → Caffeine |
 | **Files** | File manager, with Windows bookmarks | [[Super+E]] · dock |
@@ -118,6 +118,7 @@ Commands in `code` go in a terminal (Alacritty, or the drop-down one on [[Super+
 | **Logo Menu** | Mac-style menu on the Kuro logo: About, App Grid, Software, System Monitor, Terminal, Extensions, Force Quit, Sleep/Restart/Shut Down, Lock, Log Out | Click the **B** logo |
 | **Kuro Control Centre** | Mac-style tiles: Wi-Fi, Bluetooth, power mode, DND, Night Light, Caffeine, Screen Rec, Dark Style, sound, brightness, AirPlay, Remote, Captions, Vault, battery, storage, now playing | Top-right capsule · [[Super+S]] |
 | **Kuro Dynamic Island** | The clock capsule grows to show volume/brightness, media, notifications, battery and screenshots | Top centre |
+| **Kuro Study** | Lectern in the top bar: next class, cards due, deadlines, today's plan; focus on a module; selected text → flashcard | Book icon, top right · [[Super+Shift+X]] |
 | **Kuro Media** | Media button and dropdown (cover, seek, volume, players) | Top bar music note |
 | **Kuro Desk** | Desktop widgets, login briefing, Launchpad, PiP on top, pop-out PiP, privacy dots, AirPods chip | Desktop / top bar |
 | **Kuro Game Mode, AI, Sounds, Session** | Game detection; Super+A terminal; the Kuro sound theme; reopening your apps after login | — |
@@ -211,6 +212,7 @@ Commands in `code` go in a terminal (Alacritty, or the drop-down one on [[Super+
 | [[Super+Alt+V]] | Vault lock / unlock |
 | [[Super+Alt+F]] | Focus timer: start a 25 min block / stop (with the focus tunnel) |
 | [[Super+Alt+X]] (hold) | X-ray peek: see what's behind the window under the pointer |
+| [[Super+Shift+X]] | Kuro Study: turn the selected text into a Lectern flashcard (short text = question, longer text = answer; pick the module, Enter saves) |
 | [[Super+Alt+T]] | Wallpapers → Theme tab (Theme Studio) |
 | [[Super+Alt+P]] | Wallpapers → Wallpapers tab |
 | [[Super+Alt+N]] | Next wallpaper |
@@ -302,7 +304,9 @@ with `bash ~/bapirlo-os/<script>.sh restore`. For an extension the quick off swi
 - **Desktop widgets and login briefing** (Kuro Desk). Clock, Calendar, Up next, Weather and System only show on an empty desktop ([[Super+Alt+E]] to move or hide them). The briefing appears once after login.
   *Off:* Kuro Desk settings, or `gnome-extensions disable bapirlo-desk@bapirlo-os` (this also turns off Launchpad, PiP and privacy dots).
 - **Privacy dots.** A red dot means the microphone is on, green means the camera, blue means screen sharing. They sit in the system capsule. Part of Kuro Desk.
-- **Session restore.** After login, the apps you had open come back on their workspaces. *Off:* disable `bapirlo-session@bapirlo-os` and `SmartAutoMoveNG@lauinger-clan.de`.
+- **Session restore.** Log out / restart and everything comes back: the apps you had open, every window on its workspace,
+  monitor, position and size (maximised / minimised too), terminal folders and Files folders. Tabs come back from each app
+  (Chrome: Settings → On start-up → *Continue where you left off*). *Off:* disable `bapirlo-session@bapirlo-os`.
 
 ### Kuro Lens (round 21)
 
@@ -359,8 +363,8 @@ Get-things-done tools in one extension, `bapirlo-flow@bapirlo-os`. `bapirlo-flow
   Never in password fields; terminals don't support it. *Off:* `bapirlo-flow expander off`.
 - **One-key arrange.** [[Super+Shift+A]] tiles the windows on the focused monitor (latest gets the biggest spot); again within 5 s = undo.
 - **Screen watch.** [[Super+Shift+W]], drag a box: you get a notification (with a picture) when that area changes. ✕ on its tag stops it.
-- **Meeting mode.** Automatic when the camera is on or an app keeps the mic open 10 s: banners held, music paused, desk widgets and
-  the creature hidden, a call timer under the bar. 20 s after the call everything is restored. *Off:* `bapirlo-flow meeting off`.
+- **Meeting mode.** Automatic when the camera is on or an app keeps the mic open 10 s: banners held, music paused, desk widgets
+  hidden, a call timer under the bar. 20 s after the call everything is restored. *Off:* `bapirlo-flow meeting off`.
 - **Text → task.** Select text, [[Super+Shift+D]]: a to-do on the desk card, with a due day if the text says one ("by Friday",
   "tomorrow", "12 Nov", "25/11"). `bapirlo-todo add --due 2026-11-06 …` works too.
 - **Deep search.** Search shows **Inside your files**: files whose contents match (documents, PDFs, Office files, words in
@@ -372,6 +376,22 @@ Get-things-done tools in one extension, `bapirlo-flow@bapirlo-os`. `bapirlo-flow
   file type to) and asks once whether to automate it. Only rules you accept run. `bapirlo-autopilot list` / `forget ID` /
   `reset`. *Off:* `bapirlo-flow autopilot off`.
 - *Remove all of round 23:* `bash ~/bapirlo-os/2300-round23.sh restore`.
+
+### Kuro Study (round 29)
+Your Lectern data in the top bar (it replaced Kuro Creature and Kuro Optics on 2 Nov 2026). Everything is read from
+`~/.config/Lectern/data`. Lectern itself is never written to while it is open.
+- **Study chip.** The book icon in the top bar shows the one thing that matters now: `CS2603 in 25m` before a class, `· 40m left`
+  during it, a hand-in due within 3 days, or how many flashcards are due. Click it to see this week (reading / exam weeks
+  included), today's classes with rooms, deadlines with days left, cards due per module and Lectern's plan for today.
+- **Focus on a module.** *Focus on… → CS2605* starts a Kuro Bar focus block ([[Super+Alt+F]] timer + focus tunnel). When it ends
+  it is added to Lectern's study log for that module, so it counts in Lectern's stats and streak.
+- **Flashcard from anything.** Select text in a PDF, slide or web page and press [[Super+Shift+X]]. Short text becomes the question,
+  longer text the answer. The module is guessed from the class you're in (or just left), else the last one you used.
+- **How it gets into Lectern.** New cards and focus time go straight in when Lectern is closed. While it's open they wait in
+  `~/.local/state/bapirlo/lectern-inbox.json` and go in within a minute of closing it. The old file is copied to
+  `~/.local/state/bapirlo/lectern-backups/` first (20 kept). From a terminal: `kuro-study summary`, `kuro-study add CS2603 "Q" "A"`,
+  `kuro-study status`.
+- *Off:* `gnome-extensions disable bapirlo-study@bapirlo-os`.
 
 ### Power, performance & games
 

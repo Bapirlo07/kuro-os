@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""Kuro Study — your Lectern data in the top bar (Kuro OS round 29).
+  kuro-study summary [--json]        today's classes, cards due, deadlines, today's plan
+  kuro-study add MODULE FRONT [BACK] new flashcard for Lectern (MODULE = cs2603 / CS2603 / "" = none)
+  kuro-study focus MODULE [MIN]      start a focus block (Kuro Bar timer) that counts for MODULE in Lectern
+  kuro-study flush                   hand queued cards / focus time to Lectern now (only while Lectern is closed)
+  kuro-study status                  what is waiting in the queue
+Lectern keeps its data in memory while it runs and would overwrite anything written behind its back, so new
+cards and focus time wait in ~/.local/state/bapirlo/lectern-inbox.json and go in the moment Lectern is closed
+(the Kuro Study extension calls `flush` every minute). Before every write the old file is copied to
+~/.local/state/bapirlo/lectern-backups/. Only stdlib.
+"""
+import datetime as dt
+import fcntl
+import json
+import os
+import random
+import shutil
+import string
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+LECTERN = Path(os.environ.get("KURO_LECTERN_DIR") or Path.home() / ".config/Lectern/data")
+STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "bapirlo"
+INBOX = STATE / "lectern-inbox.json"
+TAGS = STATE / "study-focus.json"          # [{"at": epoch s, "module": id}] — which module a focus block was for
+BACKUPS = STATE / "lectern-backups"
+FOCUS_LOG = STATE / "focus.tsv"
+BIN = Path(__file__).resolve().parent
+
+
+def load(name, default):
+    try:
+        return json.loads((LECTERN / name).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".kuro-new")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def lectern_running():
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            comm = (p / "comm").read_text().strip().lower()
+        except Exception:
+            continue
+        if comm == "lectern" or comm.startswith("lectern.appimag"):
+            return True
+    return False
+
+
+def new_id(prefix=""):
+    return prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=13 - len(prefix)))
+
+
+# ---------------------------------------------------------------- term / timetable
+
+def term_week(settings, day):
+    try:
+        w1 = dt.date.fromisoformat(settings["term"]["week1"])
+    except Exception:
+        return None
+    return (day - w1).days // 7 + 1
+
+
+def week_kind(settings, week):
+    for c in settings.get("term", {}).get("calendar", []):
+        if c.get("from", 0) <= week <= c.get("to", -1):
+            return c.get("kind"), c.get("label")
+    return None, None
+
+
+def semester_of(settings, week):
+    for s in settings.get("term", {}).get("semesters", []):
+        if s.get("startWeek", 0) <= week <= s.get("endWeek", -1):
+            return s
+    return None
+
+
+def classes_on(day, settings, timetable, modules):
+    week = term_week(settings, day)
+    if week is None or week < 1:
+        return [], None
+    kind, label = week_kind(settings, week)
+    if kind in ("reading", "break", "exams"):
+        return [], label
+    sem = semester_of(settings, week)
+    if not sem or week > sem.get("teachingEnd", 99):
+        return [], None
+    group, choices = settings.get("group"), settings.get("choices") or {}
+    out = []
+    for s in timetable:
+        if s.get("day") != day.isoweekday():
+            continue
+        if s.get("semester") not in (sem.get("id"), "year", None):
+            continue
+        if s.get("weeks") and week not in s["weeks"]:
+            continue
+        if s.get("group") and group and s["group"] != group:
+            continue
+        if s.get("choice") and choices.get(s["choice"]) not in (None, s.get("id")):
+            continue
+        m = modules.get(s.get("module"), {})
+        try:
+            h1, m1 = map(int, s["start"].split(":"))
+            h2, m2 = map(int, s["end"].split(":"))
+        except Exception:
+            continue
+        start = dt.datetime.combine(day, dt.time(h1, m1))
+        end = dt.datetime.combine(day, dt.time(h2, m2))
+        out.append({"module": s.get("module"), "code": m.get("code", (s.get("module") or "").upper()),
+                    "color": m.get("color", "#E11D2E"), "type": s.get("type", ""),
+                    "location": s.get("location", ""), "start": start.timestamp(), "end": end.timestamp(),
+                    "time": f"{s['start']}–{s['end']}"})
+    out.sort(key=lambda c: c["start"])
+    return out, label
+
+
+# ---------------------------------------------------------------- summary
+
+def summary():
+    now = time.time()
+    today = dt.date.today()
+    settings = load("settings.json", {})
+    modules = {m["id"]: m for m in load("modules.json", []) if isinstance(m, dict) and "id" in m}
+    timetable = load("timetable.json", [])
+
+    classes, week_label = classes_on(today, settings, timetable, modules)
+    upcoming = [c for c in classes if c["end"] > now]
+    next_class = upcoming[0] if upcoming else None
+    if not next_class:          # look ahead up to a week for the next one
+        for i in range(1, 8):
+            d = today + dt.timedelta(days=i)
+            more, _ = classes_on(d, settings, timetable, modules)
+            if more:
+                next_class = dict(more[0], day=d.strftime("%a"))
+                break
+
+    # cards: reviews/learning due now + new ones up to the daily limit (minus new ones already started today)
+    cards = [c for c in load("cards.json", []) if isinstance(c, dict) and not c.get("suspended")]
+    due_ms = now * 1000
+    midnight = dt.datetime.combine(today, dt.time()).timestamp() * 1000
+    reviews = [c for c in cards if c.get("state") != "new" and c.get("due", 0) <= due_ms]
+    new_cards = [c for c in cards if c.get("state") == "new"]
+    started_today = 0
+    for r in load("reviewlog.json", []):
+        if r.get("prevState") == "new" and r.get("at", 0) >= midnight:
+            started_today += 1
+    new_today = max(0, min(len(new_cards), int(settings.get("newCardsPerDay", 20)) - started_today))
+    per_module = {}
+    for c in reviews + new_cards[:new_today]:
+        per_module[c.get("moduleId") or ""] = per_module.get(c.get("moduleId") or "", 0) + 1
+
+    # deadlines: Lectern's term deadlines + coursework, not done, not past by more than a day
+    deadlines = []
+    w1 = None
+    try:
+        w1 = dt.date.fromisoformat(settings["term"]["week1"])
+    except Exception:
+        pass
+    for d in load("deadlines.json", []):
+        if d.get("done") or not w1 or not d.get("rel"):
+            continue
+        rel = d["rel"]
+        try:
+            day = w1 + dt.timedelta(days=(int(rel["week"]) - 1) * 7 + int(rel.get("day", 1)) - 1)
+            hh, mm = map(int, (rel.get("time") or "23:59").split(":"))
+        except Exception:
+            continue
+        deadlines.append({"title": d.get("title", ""), "module": d.get("module"), "weight": d.get("weight", 0),
+                          "kind": d.get("kind", ""), "at": dt.datetime.combine(day, dt.time(hh, mm)).timestamp()})
+    for c in load("coursework.json", {}).get("items", []):
+        if c.get("submittedAt"):
+            continue
+        try:
+            hh, mm = map(int, (c.get("dueTime") or "23:59").split(":"))
+            at = dt.datetime.combine(dt.date.fromisoformat(c["due"]), dt.time(hh, mm)).timestamp()
+        except Exception:
+            continue
+        # same module + same moment as a term deadline = the same hand-in, keep one
+        if any(x["module"] == c.get("moduleId") and abs(x["at"] - at) < 3600 for x in deadlines):
+            continue
+        deadlines.append({"title": c.get("title", ""), "module": c.get("moduleId"), "weight": c.get("weight", 0),
+                          "kind": "coursework", "at": at})
+    deadlines = sorted((d for d in deadlines if d["at"] > now - 86400), key=lambda d: d["at"])
+    for d in deadlines:
+        m = modules.get(d["module"], {})
+        d["code"], d["color"] = m.get("code", (d["module"] or "").upper()), m.get("color", "#E11D2E")
+        d["days"] = (dt.date.fromtimestamp(d["at"]) - today).days
+
+    plan = []
+    for s in load("plan.json", {}).get("sessions", []):
+        if s.get("date") == today.isoformat():
+            m = modules.get(s.get("moduleId"), {})
+            plan.append({"title": s.get("title", ""), "minutes": s.get("minutes", 0), "module": s.get("moduleId"),
+                         "code": m.get("code", ""), "color": m.get("color", "#E11D2E"), "done": bool(s.get("done"))})
+
+    week = term_week(settings, today)
+    sem = semester_of(settings, week) if week else None
+    mods = [{"id": m["id"], "code": m.get("code", m["id"].upper()), "title": (m.get("title") or "").strip(),
+             "color": m.get("color", "#E11D2E")}
+            for m in modules.values()
+            if not m.get("placeholder") and (not sem or m.get("semester") in (sem.get("id"), "year"))]
+
+    # focus minutes per module today, from Lectern's study log (+ what is still queued)
+    inbox = read_json(INBOX, {})
+    studied = {}
+    for s in load("studylog.json", []) + inbox.get("studylog", []):
+        try:
+            if dt.datetime.fromisoformat(s["start"].replace("Z", "+00:00")).astimezone().date() == today:
+                studied[s.get("moduleId") or ""] = studied.get(s.get("moduleId") or "", 0) + int(s.get("minutes", 0))
+        except Exception:
+            pass
+
+    return {"now": now, "week": week, "weekLabel": week_label, "classes": classes, "next": next_class,
+            "cardsDue": sum(per_module.values()), "cardsByModule": per_module,
+            "deadlines": deadlines[:6], "plan": plan, "modules": mods, "studied": studied,
+            "queued": len(inbox.get("cards", [])) + len(inbox.get("studylog", [])),
+            "lectern": lectern_running(), "ok": (LECTERN / "settings.json").exists()}
+
+
+# ---------------------------------------------------------------- inbox
+
+class Locked:
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.f = open(STATE / "lectern-inbox.lock", "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *a):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def resolve_module(arg):
+    if not arg:
+        return ""
+    mods = load("modules.json", [])
+    for m in mods:
+        if arg.lower() in (m.get("id", "").lower(), m.get("code", "").lower()):
+            return m["id"]
+    raise SystemExit(f"no module '{arg}' in Lectern (try: {', '.join(m.get('code', '') for m in mods)})")
+
+
+def current_topic(module):
+    """The topic for this week (moduleId-wN) if Lectern has one, else ''."""
+    settings = load("settings.json", {})
+    week = term_week(settings, dt.date.today())
+    for m in load("modules.json", []):
+        if m.get("id") == module:
+            ids = [t.get("id") for t in m.get("topics", [])]
+            best = ""
+            for w in range(week or 0, 0, -1):
+                if f"{module}-w{w}" in ids:
+                    best = f"{module}-w{w}"
+                    break
+            return best
+    return ""
+
+
+def add_card(module, front, back):
+    front, back = front.strip(), back.strip()
+    if not front:
+        raise SystemExit("the front of the card is empty")
+    module = resolve_module(module)
+    ms = int(time.time() * 1000)
+    card = {"state": "new", "due": ms, "interval": 0, "ease": 2.5, "reps": 0, "lapses": 0, "step": 0,
+            "created": ms, "suspended": False, "id": new_id("k"), "moduleId": module,
+            "topicId": current_topic(module) if module else "", "front": front, "back": back, "source": "kuro"}
+    with Locked():
+        inbox = read_json(INBOX, {})
+        inbox.setdefault("cards", []).append(card)
+        write_json(INBOX, inbox)
+    done = flush()
+    return "added to Lectern" if done.get("cards") else "saved — goes into Lectern when you close it"
+
+
+def collect_focus():
+    """Finished focus blocks (focus.tsv) that were started for a module → queued Lectern study-log entries."""
+    tags = read_json(TAGS, {"tags": [], "synced": 0})
+    if not tags.get("tags"):
+        return 0
+    synced = float(tags.get("synced", 0))
+    added = 0
+    inbox = read_json(INBOX, {})
+    try:
+        lines = FOCUS_LOG.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        lines = []
+    newest = synced
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        try:
+            start = dt.datetime.fromisoformat(parts[0])
+            minutes = int(parts[1])
+        except Exception:
+            continue
+        t = start.timestamp()
+        if t <= synced or minutes < 1:
+            continue
+        newest = max(newest, t)
+        tag = max((g for g in tags["tags"] if g["at"] - 10 <= t), key=lambda g: g["at"], default=None)
+        if not tag or t - tag["at"] > 120:       # block wasn't started from Kuro Study
+            continue
+        inbox.setdefault("studylog", []).append({
+            "id": new_id("s"), "moduleId": tag["module"],
+            "start": start.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "minutes": minutes, "kind": "focus"})
+        added += 1
+    if added:
+        write_json(INBOX, inbox)
+    tags["synced"] = newest
+    tags["tags"] = [g for g in tags["tags"] if g["at"] > time.time() - 86400]
+    write_json(TAGS, tags)
+    return added
+
+
+def backup(name):
+    src = LECTERN / name
+    if not src.exists():
+        return
+    d = BACKUPS / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, d / name)
+    # keep the 20 newest backup folders
+    for old in sorted(BACKUPS.iterdir())[:-20]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def merge(name, items):
+    path = LECTERN / name
+    try:
+        cur = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(cur, list):
+            return False
+    except FileNotFoundError:
+        cur = []
+    except Exception:
+        return False                       # never write over a file we couldn't read
+    have = {x.get("id") for x in cur if isinstance(x, dict)}
+    cur += [x for x in items if x.get("id") not in have]
+    backup(name)
+    write_json(path, cur)
+    return True
+
+
+def flush():
+    done = {"cards": 0, "studylog": 0}
+    with Locked():
+        collect_focus()
+        inbox = read_json(INBOX, {})
+        if not (inbox.get("cards") or inbox.get("studylog")):
+            return done
+        if lectern_running() or not (LECTERN / "settings.json").exists():
+            return done
+        for key, name in (("cards", "cards.json"), ("studylog", "studylog.json")):
+            if inbox.get(key) and merge(name, inbox[key]):
+                done[key] = len(inbox[key])
+                inbox[key] = []
+        write_json(INBOX, inbox)
+    return done
+
+
+def focus(module, minutes=None):
+    module = resolve_module(module)
+    with Locked():
+        tags = read_json(TAGS, {"tags": [], "synced": time.time() - 1})
+        tags.setdefault("synced", time.time() - 1)
+        tags["tags"].append({"at": time.time(), "module": module})
+        write_json(TAGS, tags)
+    subprocess.run([str(BIN / "bapirlo-focus"), "start"] + ([str(minutes)] if minutes else []), check=False)
+
+
+def main(argv):
+    cmd = argv[0] if argv else "summary"
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if cmd == "summary":
+        s = summary()
+        if "--json" in argv:
+            print(json.dumps(s, ensure_ascii=False))
+            return 0
+        if not s["ok"]:
+            print("Lectern data not found in", LECTERN)
+            return 1
+        print(f"Week {s['week']}" + (f" · {s['weekLabel']}" if s["weekLabel"] else ""))
+        for c in s["classes"]:
+            print(f"  {c['time']}  {c['code']:8} {c['type']:8} {c['location']}")
+        if s["next"]:
+            print("Next class:", s["next"]["code"], s["next"].get("day", "today"), s["next"]["time"])
+        print("Cards due:", s["cardsDue"])
+        for d in s["deadlines"]:
+            print(f"  {d['days']:>3} d  {d['code']:8} {d['title']}")
+        if s["queued"]:
+            print(f"{s['queued']} waiting for Lectern to close")
+        return 0
+    if cmd == "add":
+        if len(argv) < 3:
+            print("usage: kuro-study add MODULE FRONT [BACK]", file=sys.stderr)
+            return 2
+        print(add_card(argv[1], argv[2], argv[3] if len(argv) > 3 else ""))
+        return 0
+    if cmd == "focus":
+        if len(argv) < 2:
+            print("usage: kuro-study focus MODULE [MIN]", file=sys.stderr)
+            return 2
+        focus(argv[1], int(argv[2]) if len(argv) > 2 else None)
+        return 0
+    if cmd == "flush":
+        d = flush()
+        print(f"moved {d['cards']} cards, {d['studylog']} focus blocks into Lectern")
+        return 0
+    if cmd == "status":
+        inbox = read_json(INBOX, {})
+        print(f"{len(inbox.get('cards', []))} cards, {len(inbox.get('studylog', []))} focus blocks waiting"
+              + (" (Lectern is open)" if lectern_running() else ""))
+        return 0
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

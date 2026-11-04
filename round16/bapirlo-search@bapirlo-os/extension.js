@@ -89,8 +89,8 @@ const COMMANDS = [
         run: ['bapirlo-knock', 'toggle']},
     {words: "what's whats new updates features kuro round", name: "What's new in Kuro OS", icon: 'starred-symbolic',
         run: [`${OS}/whats-new/bapirlo-whats-new`]},
-    {words: 'kuro creature pet hide show', name: 'Kuro creature: hide / show', icon: 'face-smile-big-symbolic',
-        run: ['bapirlo-pet', 'toggle']},
+    {words: 'study lectern flashcards cards revise uni class deadline', name: 'Open Lectern (study)', icon: 'accessories-dictionary-symbolic',
+        run: ['gtk-launch', 'lectern']},
     // round 22 — Kuro Cosmos
     {words: 'aurora sky night stars northern lights wallpaper', name: 'Aurora sky wallpaper on / off', icon: 'weather-clear-night-symbolic',
         run: ['bapirlo-cosmos', 'aurora', 'toggle']},

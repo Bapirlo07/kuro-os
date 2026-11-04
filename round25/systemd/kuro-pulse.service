@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro Pulse — beat of the music for Kuro Sense (started/stopped by the shell while music plays)
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/share/bapirlo/gesture-venv/bin/python -I %h/bapirlo-os/round25/helpers/kuro-pulse.py
+Restart=on-failure
+RestartSec=3
+Nice=5
+CPUQuota=15%

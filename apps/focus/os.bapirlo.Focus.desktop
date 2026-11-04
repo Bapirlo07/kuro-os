@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=Kuro Focus
+GenericName=Focus timer & app blocker
+Comment=Focus blocks that lock every app but the ones you allow — on this PC and on your iPhone
+Exec=@REPO@/apps/focus/kuro-focus
+Icon=kuro-focus
+Terminal=false
+Categories=Utility;
+Keywords=pomodoro;focus;timer;study;block;lock;opal;iphone;lectern;
+StartupWMClass=os.bapirlo.Focus
+Actions=start;apps;iphone;
+
+[Desktop Action start]
+Name=Start / stop a block
+Exec=@REPO@/bin/bapirlo-focus
+
+[Desktop Action apps]
+Name=Allowed apps
+Exec=@REPO@/apps/focus/kuro-focus --page=apps
+
+[Desktop Action iphone]
+Name=iPhone setup
+Exec=@REPO@/apps/focus/kuro-focus --page=iphone

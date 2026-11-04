@@ -36,8 +36,19 @@ printf '\n  %s%sKURO OS · UPDATE%s\n\n' "$B" "$R" "$N"
 printf '  %sA Timeshift snapshot is taken automatically before anything is upgraded.%s\n' "$D" "$N"
 printf '  %sOld versions and the previous update snapshot are deleted to save space.%s\n\n' "$D" "$N"
 before=$(avail)
-paru -Syu
+# safety check first: a GNOME major upgrade that would switch extensions off can be held back
+HOLD=()
+"$(dirname "$(readlink -f "$0")")/kuro-preflight"
+pf=$?
+if [ $pf -eq 1 ]; then
+  printf '\n  %sNothing was changed.%s Press Enter to close.' "$D" "$N"; read -r _; exit 0
+elif [ $pf -eq 10 ]; then
+  HOLD=(--ignore gnome-shell,mutter,gnome-session,gnome-settings-daemon,gnome-control-center,gdm,gjs,gnome-shell-extensions)
+  printf '  %sGNOME stays on this version; everything else updates.%s\n\n' "$D" "$N"
+fi
+paru -Syu "${HOLD[@]}"
 rc=$?
+[ $rc -eq 0 ] && "$(dirname "$(readlink -f "$0")")/kuro-preflight" --after
 echo
 if [ $rc -eq 0 ]; then
   cleanup_user

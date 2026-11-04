@@ -1,0 +1,10 @@
+[Unit]
+Description=Kuro Backup every night (runs at the next start if the laptop was off)
+
+[Timer]
+OnCalendar=*-*-* 03:30
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

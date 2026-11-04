@@ -55,11 +55,14 @@ export default class BapirloSoundsExtension extends Extension {
         if (now - this._last < MIN_GAP_US)
             return;
         this._last = now;
-        this._play('message-new-instant', 'Notification');
+        this._play('message-new-instant', 'Notification', notification.source);
     }
 
-    _play(id, description) {
+    _play(id, description, source = null) {
         if (!this._soundSettings.get_boolean('event-sounds'))
+            return;
+        // Kuro Sense (round 25): from where the app's window is, if spatial sounds are on
+        if (source && globalThis.kuroSpatial?.playFor(id, source))
             return;
         global.display.get_sound_player().play_from_theme(id, description, null);
     }

@@ -1,6 +1,8 @@
 // Kuro Desk — picture-in-picture (and Live Captions) always on top.
 // Chrome's (and Firefox's) PiP window and the Live Captions window are made "always on top" and
 // "on every workspace" as soon as they appear — Wayland apps can't ask for that themselves.
+// Unpin / re-pin any window (PiP included) with Super+Alt+K (mutter toggle-above) or the window
+// menu's "Always on Top"; an unpinned PiP is left alone until it is closed and reopened.
 // Fullscreen games / videos: a focused fullscreen window is raised into the same top layer, so
 // whenever the stack changes and one of those ends up above a kept window, the kept windows are
 // raised back over it (one cheap check per restack, nothing runs otherwise). Note: while a PiP
@@ -23,9 +25,22 @@ function kindOf(w) {
     const cls = `${w.get_wm_class() ?? ''} ${w.get_gtk_application_id?.() ?? ''} ${w.get_sandboxed_app_id?.() ?? ''}`;
     if (/net\.sapples\.LiveCaptions/i.test(cls))
         return 'captions';
-    if (BROWSERS.test(cls) && PIP_TITLE.test((w.get_title() ?? '').trim()))
+    // Chrome's PiP on Wayland has an EMPTY app id, so fall back to the owning process name
+    if (PIP_TITLE.test((w.get_title() ?? '').trim()) && (BROWSERS.test(cls) || BROWSERS.test(procName(w))))
         return 'pip';
     return null;
+}
+
+function procName(w) {
+    const pid = w.get_pid?.() ?? 0;
+    if (pid <= 0)
+        return '';
+    try {
+        const [ok, bytes] = GLib.file_get_contents(`/proc/${pid}/comm`);
+        return ok ? new TextDecoder().decode(bytes).trim() : '';
+    } catch {
+        return '';
+    }
 }
 
 export class PipKeeper {
@@ -53,7 +68,7 @@ export class PipKeeper {
         // (wm-class) itself arrives after window-created: watch until the class is known and
         // isn't a browser, or the window turns out to be one to keep
         const cls = w.get_wm_class();
-        if (this._watched.has(w) || (cls && !BROWSERS.test(cls)))
+        if (this._watched.has(w) || (cls && !BROWSERS.test(cls) && !BROWSERS.test(procName(w))))
             return;
         this._watched.add(w);
         const check = () => {
@@ -62,7 +77,7 @@ export class PipKeeper {
             if (k) {
                 this._unwatch(w);
                 this._keep(w, k);
-            } else if (c && !BROWSERS.test(c) && !/LiveCaptions/i.test(c)) {
+            } else if (c && !BROWSERS.test(c) && !/LiveCaptions/i.test(c) && !BROWSERS.test(procName(w))) {
                 this._unwatch(w);
             }
         };
@@ -144,7 +159,7 @@ export class PipKeeper {
     }
 
     _liftOverFullscreen() {
-        const kept = [...this._kept.keys()].filter(w => !w.minimized);
+        const kept = [...this._kept.keys()].filter(w => !w.minimized && w.is_above());
         if (kept.length === 0)
             return;
         const ws = global.workspace_manager.get_active_workspace();

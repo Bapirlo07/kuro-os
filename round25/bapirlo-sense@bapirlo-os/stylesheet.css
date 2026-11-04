@@ -1,0 +1,44 @@
+/* Kuro Sense — Liquid Glass: the pills' own backgrounds go see-through; glass.js draws the glass behind them. */
+#uiGroup.kuro-liquid-islands #panel #panelLeft,
+#uiGroup.kuro-liquid-islands #panel #panelRight,
+#uiGroup.kuro-liquid-islands #panel #panelCenter,
+#uiGroup.kuro-liquid-islands #panel #panelCenter.bapirlo-island-rest {
+  background-color: rgba(12, 9, 10, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.30) !important;
+}
+#uiGroup.kuro-liquid-bar #panel {
+  background-gradient-direction: none !important;
+  background-color: rgba(12, 9, 10, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+}
+#uiGroup.kuro-liquid #dashtodockContainer #dash .dash-background {
+  background-color: rgba(12, 9, 10, 0.10) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+}
+#uiGroup.kuro-liquid > .bapirlo-island {
+  background-color: rgba(12, 9, 10, 0.30) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+/* overview / lock: the panes hide, so the pills go back to fully clear like the looks want */
+#uiGroup.kuro-liquid-islands #panel:overview #panelLeft,
+#uiGroup.kuro-liquid-islands #panel:overview #panelRight,
+#uiGroup.kuro-liquid-islands #panel:overview #panelCenter,
+#uiGroup.kuro-liquid-bar #panel:overview {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* voice: the listening pill */
+.kuro-voice-pill {
+  background-color: rgba(12, 9, 10, 0.92);
+  border: 1px solid rgba(228, 0, 61, 0.45);
+  border-radius: 999px;
+  padding: 10px 18px;
+  spacing: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.kuro-voice-dot { width: 12px; height: 12px; border-radius: 6px; background-color: #e4003d; }
+.kuro-voice-label { color: #f3ecec; font-size: 15px; font-weight: 600; }
+.kuro-voice-heard { color: rgba(243, 236, 236, 0.7); font-size: 13px; }

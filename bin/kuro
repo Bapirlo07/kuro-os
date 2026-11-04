@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Kuro OS — short commands.
+#   kuro check · kuro rescue [--list|N] · kuro status · kuro unblock UUID · kuro snapshot     (Kuro Guardian)
+#   kuro backup [list|where DIR] · kuro restore-all [FILE]                                   (whole-setup backup)
+#   kuro power [intel|undo|ignore APP_ID]                                                    (battery autopilot)
+#   kuro preflight                                                                           (update safety check)
+D="$(dirname "$(readlink -f "$0")")"
+case "${1:-status}" in
+  backup)      shift; exec "$D/kuro-backup" "${@:-now}" ;;
+  restore-all) shift; exec "$D/kuro-backup" restore "$@" ;;
+  power)       shift; exec "$D/kuro-power" "${@:-report}" ;;
+  preflight)   shift; exec "$D/kuro-preflight" --report "$@" ;;
+  help|-h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)           exec "$D/kuro-guardian" "${@:-status}" ;;
+esac

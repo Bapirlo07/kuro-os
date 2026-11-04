@@ -156,6 +156,7 @@ export class Aurora {
             return;
         bg.disconnectObject(this);
         const tint = accent();
+        this._tint = tint;
         Main.layoutManager.monitors.forEach((m, i) => {
             const s = new ShaderActor(DECL, BODY, {x: m.x, y: m.y, width: m.width, height: m.height, reactive: false});
             s._monitor = i;
@@ -273,10 +274,20 @@ export class Aurora {
             else
                 comet = [...(this._lastComet ?? [0.5, 0.7, 0]).slice(0, 2), 0.6 * (1 - b / 1.2)];
         }
+        // Kuro Sense (round 25): while music plays the sky pulses to the kick and leans to the album colour
+        const beat = globalThis.kuroBeat;
+        const kick = beat?.bass ?? 0;
+        this._beatMix = (this._beatMix ?? 0) + ((beat?.level ? 0.55 : 0) - (this._beatMix ?? 0)) * 0.03;
+        const base = this._tint ?? [0.894, 0, 0.239];
+        const tintNow = beat?.col && this._beatMix > 0.01 ? base.map((v, k) => v + (beat.col[k] - v) * this._beatMix) : null;
+        const wasTinted = this._tinted;
+        this._tinted = !!tintNow;
         for (const s of this._skies) {
             if (this._covered(s._monitor))
                 continue;
-            s.set('t', t).set('energy', this._energy).set('comet', comet).set('burst', burst);
+            s.set('t', t).set('energy', Math.min(1, this._energy + kick * 0.7)).set('comet', comet).set('burst', burst);
+            if (tintNow || wasTinted)
+                s.set('tint', tintNow ?? base);
             s.set('m0', mets[0]).set('m1', mets[1]).set('m2', mets[2]);
         }
     }

@@ -384,7 +384,11 @@ export default class BapirloLiveExtension extends Extension {
     // returns whether the art moved (so the frame must be redrawn)
     _updateParallax() {
         let target = [0, 0];
-        if (this._parallaxAllowed()) {
+        // Kuro Sense (round 25): while the webcam tracks your head, the eye follows the head, not the pointer
+        const head = this._parallaxAllowed() ? globalThis.kuroHead?.get?.() : null;
+        if (head) {
+            target = head;
+        } else if (this._parallaxAllowed()) {
             const [px, py] = global.get_pointer();
             const m = Main.layoutManager.primaryMonitor;
             if (m) {

@@ -7,6 +7,8 @@
 //   Status(state, hint)          looking | tracking | dark | paused | nocam | off → top-bar icon + hand view
 //   Gesture(name)                swipe-left/right/up/down, palm, fist, thumb-up/down, shaka, victory-left/right, rock
 //   Dial(kind, delta)            fist / victory moved up or down while held → volume / scroll
+//   Hand2(pts, pose, progress)  round 28: the SECOND hand (empty pts = gone) → drawn in the hand view too.
+//                                Two-hand gestures: 🤏🤏 pull apart / together = Dial("spread") · ✋✋ still = two-palms
 //   Mirror(bytes)                192×108 RGB camera thumbnail (only while "Show camera picture" is on)
 //   Lost() · Say(text) · Help()
 // What each gesture does lives in ~/.config/bapirlo/gestures.json ("actions"), reloaded when it changes.
@@ -32,6 +34,7 @@ import {DEFAULT_DRAW} from './draw-shapes.js';
 const IFACE = `<node><interface name="org.bapirlo.Gestures">
   <method name="Pointer"><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="b" direction="in"/><arg type="s" direction="in"/></method>
   <method name="Hand"><arg type="ad" direction="in"/><arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+  <method name="Hand2"><arg type="ad" direction="in"/><arg type="s" direction="in"/><arg type="d" direction="in"/></method>
   <method name="Status"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
   <method name="Lost"/>
   <method name="Gesture"><arg type="s" direction="in"/></method>
@@ -51,6 +54,8 @@ const DEFAULT_ACTIONS = {
     'palm': 'desktop', 'fist': 'media-toggle', 'thumb-up': 'volume-up', 'thumb-down': 'volume-down',
     'shaka': 'apps', 'dial-victory': 'scroll', 'pinch-tap': 'click',
     'victory-left': 'media-prev', 'victory-right': 'media-next',
+    // round 28: both hands
+    'dial-spread': 'zoom', 'two-palms': 'overview',
     // round 20: 🤟 retired; these still exist but do nothing unless you set them in gestures.json
     'rock': 'none', 'fist-left': 'none', 'fist-right': 'none', 'victory': 'none', 'dial-fist': 'none',
 };
@@ -68,6 +73,8 @@ const HOW = [
     ['✌', 'Two fingers, flick left / right', 'victory-left|victory-right'],
     ['🤙', 'Shaka (thumb + pinky), hold', 'shaka'],
     ['🤟', 'Hold 🤟 and draw a shape', 'draw'],
+    ['🤏🤏', 'Pinch with both hands, pull apart / together', 'dial-spread'],
+    ['✋✋', 'Both palms, hold still', 'two-palms'],
 ];
 const NICE = {
     'ws-next': 'Next workspace  →', 'ws-prev': '←  Previous workspace', 'overview': 'Overview',
@@ -75,7 +82,7 @@ const NICE = {
     'media-next': 'Next track  ⏭', 'media-prev': '⏮  Previous track', 'kuro-cheer': 'Kuro says hi',
     'close-window': 'Close window', 'search': 'Kuro Search', 'screenshot': 'Screenshot',
     'volume': 'Volume', 'volume-up': 'Volume up', 'volume-down': 'Volume down', 'apps': 'Open an app', 'scroll': 'Scroll', 'click': 'Click', 'canvas': 'Zoom canvas', 'help': 'Cheat sheet',
-    'lock': 'Lock screen', 'none': 'nothing',
+    'lock': 'Lock screen', 'zoom': 'Zoom', 'none': 'nothing',
 };
 const POSE_ICON = {
     'palm': '✋', 'fist': '✊', 'thumb-up': '👍', 'thumb-down': '👎', 'rock': '🤟', 'shaka': '🤙', 'victory': '✌', 'point': '☝',
@@ -114,6 +121,7 @@ export default class KuroGesturesExtension extends Extension {
         this._state = 'off';
         this._hint = '';
         this._pts = null;
+        this._pts2 = null;
         this._minimized = null;
 
         this._buildHud();
@@ -261,6 +269,13 @@ export default class KuroGesturesExtension extends Extension {
             this._skel.queue_repaint();
     }
 
+    Hand2(pts, pose, progress) {
+        this._pts2 = pts.length >= 42 ? pts : null;
+        this._pose2 = pose;
+        if (this._hud?.visible)
+            this._skel.queue_repaint();
+    }
+
     Status(state, hint) {
         this._setHud(state, hint);
     }
@@ -272,6 +287,7 @@ export default class KuroGesturesExtension extends Extension {
         this._last = null;
         this._vx = this._vy = 0;
         this._pts = null;
+        this._pts2 = null;
         this._progress = 0;
         this._endDial();
         this._skel?.queue_repaint();
@@ -296,6 +312,8 @@ export default class KuroGesturesExtension extends Extension {
         const d = this._dialing;
         if (action === 'volume') {
             this._volumeBy(delta * 0.22);
+        } else if (action === 'zoom') {
+            this._zoomBy(delta);
         } else if (action === 'scroll') {
             d.acc += delta;
             const step = 0.14;
@@ -522,6 +540,29 @@ export default class KuroGesturesExtension extends Extension {
                 Main.osdWindowManager.show(-1, icon, null, level, 1);
         } catch {}
         this._showDotLabel(`Volume ${Math.round(level * 100)}%`);
+    }
+
+    // round 28: two-hand zoom = GNOME's own screen magnifier (Accessibility → Zoom), centred on the dot
+    _zoomBy(delta) {
+        this._magSettings ??= new Gio.Settings({schema_id: 'org.gnome.desktop.a11y.magnifier'});
+        this._a11yApps ??= new Gio.Settings({schema_id: 'org.gnome.desktop.a11y.applications'});
+        const on = this._a11yApps.get_boolean('screen-magnifier-enabled');
+        let f = on ? this._magSettings.get_double('mag-factor') : 1;
+        f = Math.min(8, Math.max(1, f * Math.exp(delta * 0.9)));
+        if (f < 1.06) {
+            if (on)
+                this._a11yApps.set_boolean('screen-magnifier-enabled', false);
+            this._showDotLabel('Zoom off');
+            return;
+        }
+        this._magSettings.set_double('mag-factor', Math.round(f * 100) / 100);
+        if (!on)
+            this._a11yApps.set_boolean('screen-magnifier-enabled', true);
+        try {
+            if (this._px !== undefined)
+                Main.magnifier?.getZoomRegions?.()[0]?.scrollContentsTo?.(this._px, this._py);
+        } catch {}
+        this._showDotLabel(`Zoom ${f.toFixed(1)}×`);
     }
 
     _endDial() {
@@ -778,8 +819,8 @@ export default class KuroGesturesExtension extends Extension {
             cr.fill();
         }
         const p = this._pts;
-        if (p && p.length >= 42) {
-            const X = i => p[i * 2] * w, Y = i => p[i * 2 + 1] * h;
+        const bones = (q, dots) => {
+            const X = i => q[i * 2] * w, Y = i => q[i * 2 + 1] * h;
             cr.setLineCap(1);
             cr.setLineWidth(2.2);
             cr.setSourceRGBA(1, 0.93, 0.95, 0.85);
@@ -790,10 +831,16 @@ export default class KuroGesturesExtension extends Extension {
             cr.stroke();
             for (let i = 0; i < 21; i++) {
                 const tip = [4, 8, 12, 16, 20].includes(i);
-                cr.setSourceRGBA(...RED, 1);
+                cr.setSourceRGBA(...dots, 1);
                 cr.arc(X(i), Y(i), tip ? 3.2 : 2.2, 0, 2 * Math.PI);
                 cr.fill();
             }
+        };
+        if (p && p.length >= 42) {
+            const X = i => p[i * 2] * w, Y = i => p[i * 2 + 1] * h;
+            if (this._pts2)                    // the second hand, in a softer colour so you can tell them apart
+                bones(this._pts2, [1, 0.55, 0.7]);
+            bones(p, RED);
             if (this._pinch) {
                 cr.setSourceRGBA(1, 1, 1, 0.9);
                 cr.arc((X(4) + X(8)) / 2, (Y(4) + Y(8)) / 2, 6, 0, 2 * Math.PI);
